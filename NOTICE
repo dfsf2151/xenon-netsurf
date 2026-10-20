@@ -41,3 +41,7 @@ The binary in release/ns360.zip was built from the frontend sources and patch in
 this repository, the NetSurf commit and dependency revisions listed in
 deps.lock, and the upstream mbedTLS/xsdk trees. The patch and build notes are in
 patches/ and docs/BUILDING.md.
+
+`LICENSE` contains the GNU GPL version 2 text. `COPYING` contains NetSurf's
+original licence notice, including its OpenSSL linking exception and the MIT
+licence for the artwork.
