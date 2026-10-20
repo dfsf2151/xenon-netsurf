@@ -34,3 +34,10 @@ OpenH264
 libpng, zlib, libjpeg, utf8proc, libcss, libdom, libhubbub and the other NetSurf
 libraries keep their upstream licences. The prebuilt package includes only
 compiled code and the Mozilla CA bundle.
+
+Corresponding source
+--------------------
+The binary in release/ns360.zip was built from the frontend sources and patch in
+this repository, the NetSurf commit and dependency revisions listed in
+deps.lock, and the upstream mbedTLS/xsdk trees. The patch and build notes are in
+patches/ and docs/BUILDING.md.
