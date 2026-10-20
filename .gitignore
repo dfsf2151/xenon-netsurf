@@ -1,0 +1,13 @@
+*.o
+*.a
+*.log
+build/
+netsurf-src/
+deps/
+prefix/
+third_party/
+dist/
+input.txt
+*.bin
+*.yuv
+*.xex

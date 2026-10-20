@@ -1,0 +1,19 @@
+# Dependency revisions used by the tested build.
+# Format: name url commit (or tarball version)
+buildsystem https://github.com/netsurf-browser/buildsystem.git 0005ae300283ff01c2e2b05e7376b3e55dea21f7
+libcss https://github.com/netsurf-browser/libcss.git 006ffc4096040da13690abc380e5f828ec08284d
+libdom https://github.com/netsurf-browser/libdom.git f69781e1f062444b5af3f62d431d7d94018da53b
+libhubbub https://github.com/netsurf-browser/libhubbub.git 6651b8cf87a4aa87bcdb2ff024a02659cd3f9402
+libnsbmp https://github.com/netsurf-browser/libnsbmp.git 3e5409942cc8a7ea7ef705b035394c6089cef4f8
+libnsgif https://github.com/netsurf-browser/libnsgif.git 22e99eb6818b1284d0f3ff1b7f46159e87221220
+libnspsl https://github.com/netsurf-browser/libnspsl.git 82815c2bc7fd70d1b6afccfa89a9a0f3fa73db8a
+libnsutils https://github.com/netsurf-browser/libnsutils.git 0bd39060740b6163bd50875326654a722df97eb2
+libparserutils https://github.com/netsurf-browser/libparserutils.git 6b0cbf086ca8eb8fe74b69f0c9ecf274eb2397ca
+libwapcaplet https://github.com/netsurf-browser/libwapcaplet.git c7c128d3eb3223b216c974471f82e9337fbcf4ba
+libpng https://github.com/pnggroup/libpng.git ed217e3e601d8e462f7fd1e04bed43ac42212429
+utf8proc https://github.com/JuliaStrings/utf8proc.git f72a4023617e2d879f2ca93086fd02bc7e3149fe
+zlib https://github.com/madler/zlib.git 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
+jpeg https://www.ijg.org/files/jpegsrc.v9e.tar.gz 9e
+mbedtls-xenon https://github.com/xenosworks/mbedtls-xenon.git 1500b8ac2ab62f3ce6c6bebafac777e55dbee93b
+netsurf https://github.com/netsurf-browser/netsurf.git 39da3c3a40af4566d86500ff3052dfdc7f9a0378
+xsdk https://github.com/xenosworks/xsdk.git (build libxsdk.a from the tested tree)

@@ -1,0 +1,36 @@
+Xenon NetSurf — third-party components
+======================================
+
+NetSurf
+  This repository is a port/frontend for NetSurf 3.11, which is licensed under
+  the GNU General Public License version 2. See LICENSE and
+  https://www.netsurf-browser.org/.
+
+minimp3
+  Header-only MP3 decoder, CC0 1.0 Universal.
+  https://github.com/lieff/minimp3
+
+mbedTLS / mbedtls-xenon
+  TLS library, Apache License 2.0. The Xenon port is by xenosworks.
+  https://github.com/Mbed-TLS/mbedtls
+  https://github.com/xenosworks/mbedtls-xenon
+
+xsdk
+  Xbox 360 homebrew SDK and toolchain support.
+  https://github.com/xenosworks/xsdk
+
+CA certificates
+  Mozilla's CA bundle as published by curl, MPL 2.0.
+  https://curl.se/docs/caextract.html
+
+Linux console font
+  The 8x16 glyph data in font8x16.c is derived from the Linux console font,
+  GPL-2.0.
+
+OpenH264
+  The separate decode benchmark uses OpenH264 2.7.0, BSD-2-Clause.
+  https://github.com/cisco/openh264
+
+libpng, zlib, libjpeg, utf8proc, libcss, libdom, libhubbub and the other NetSurf
+libraries keep their upstream licences. The prebuilt package includes only
+compiled code and the Mozilla CA bundle.

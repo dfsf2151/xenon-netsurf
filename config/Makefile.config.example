@@ -1,0 +1,35 @@
+# Build configuration for the Xenon (Xbox 360) NetSurf target.
+# Copy to netsurf-src/Makefile.config and adjust the paths below.
+
+override NETSURF_USE_CURL := NO
+override NETSURF_USE_OPENSSL := NO
+override NETSURF_USE_PNG := YES
+override NETSURF_USE_JPEG := YES
+override NETSURF_USE_GIF := YES
+override NETSURF_USE_BMP := YES
+override NETSURF_USE_WEBP := NO
+override NETSURF_USE_JPEGXL := NO
+override NETSURF_USE_NSPSL := NO
+override NETSURF_USE_DUKTAPE := NO
+override NETSURF_USE_HARU_PDF := NO
+override NETSURF_USE_VIDEO := NO
+override NETSURF_USE_RSVG := NO
+override NETSURF_USE_NSSVG := NO
+override NETSURF_USE_ROSPRITE := NO
+override NETSURF_USE_UTF8PROC := YES
+override NETSURF_USE_LIBICONV_PLUG := YES
+
+# The Xenon frontend supplies its own libc bits; newlib is the libc.
+XENON_CC ?= $(HOME)/xsdk-gcc/bin/powerpc-xsdk-elf-gcc
+XENON_CXX ?= $(HOME)/xsdk-gcc/bin/powerpc-xsdk-elf-g++
+XENON_AR ?= $(HOME)/xsdk-gcc/bin/powerpc-xsdk-elf-ar
+CC := $(XENON_CC)
+CXX := $(XENON_CXX)
+AR := $(XENON_AR)
+
+# Point these at your xsdk checkout and the cross-built dependency prefix.
+XSDK_ROOT ?= /path/to/xsdk
+XENON_PREFIX ?= $(abspath $(CURDIR)/../prefix)
+
+CFLAGS += -mcpu=cell -fno-pic -O2 -DNO_IPV6 -I$(XSDK_ROOT)/include -I$(XENON_PREFIX)/include
+CXXFLAGS += -mcpu=cell -fno-pic -O2 -DNO_IPV6 -I$(XSDK_ROOT)/include -I$(XENON_PREFIX)/include

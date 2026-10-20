@@ -1,0 +1,244 @@
+diff --git a/Makefile b/Makefile
+index d6ba683..6f034f6 100644
+--- a/Makefile
++++ b/Makefile
+@@ -131,7 +131,9 @@ $(eval $(call pkg_config_find_and_add,libdom,DOM))
+ $(eval $(call pkg_config_find_and_add,libnsutils,nsutils))
+ 
+ # Common libraries without pkg-config support
++ifeq ($(NETSURF_USE_CURL),YES)
+ LDFLAGS += -lz
++endif
+ 
+ # Optional libraries with pkgconfig
+ 
+diff --git a/content/handlers/html/layout.c b/content/handlers/html/layout.c
+index d3b6d8f..25c8615 100644
+--- a/content/handlers/html/layout.c
++++ b/content/handlers/html/layout.c
+@@ -789,6 +789,13 @@ layout_minmax_line(struct box *first,
+ 	*line_min = min;
+ 	*line_max = max;
+ 
++	/* Some pages (DuckDuckGo Lite result rows) contain a replaced box
++	 * whose shrink-to-fit width ends up above the line maximum, usually
++	 * through a negative margin. Keep the invariant instead of aborting
++	 * the whole browser on a single odd page. */
++	if (*line_max < *line_min)
++		*line_max = *line_min;
++
+ 	NSLOG(layout, DEBUG,  "line_min %i, line_max %i", min, max);
+ 
+ 	assert(b != first);
+diff --git a/content/urldb.c b/content/urldb.c
+index 950c370..b22eeea 100644
+--- a/content/urldb.c
++++ b/content/urldb.c
+@@ -115,6 +115,9 @@
+ #include "content/content.h"
+ #include "content/urldb.h"
+ 
++/* XENON: xsdk provides inet_pton() but not inet_aton(); see frontends/xenon/iconv.c */
++extern int inet_aton(const char *cp, struct in_addr *inp);
++
+ /**
+  * cookie entry.
+  *
+diff --git a/frontends/Makefile.hts b/frontends/Makefile.hts
+index 83c1cfa..bcd0dfa 100644
+--- a/frontends/Makefile.hts
++++ b/frontends/Makefile.hts
+@@ -115,7 +115,7 @@ else
+ endif
+ 
+ # valid values for the TARGET
+-VLDTARGET := amiga atari beos framebuffer gtk monkey qt riscos windows
++VLDTARGET := amiga atari beos framebuffer gtk monkey qt riscos windows xenon
+ 
+ # Check for valid TARGET
+ ifeq ($(filter $(VLDTARGET),$(TARGET)),)
+diff --git a/utils/config.h b/utils/config.h
+index 3914771..5c479e2 100644
+--- a/utils/config.h
++++ b/utils/config.h
+@@ -145,7 +145,7 @@ char *realpath(const char *path, char *resolved_path);
+ #endif
+ 
+ #define HAVE_MMAP
+-#if (defined(_WIN32) || defined(__riscos__) || defined(__HAIKU__) || defined(__BEOS__) || defined(__amigaos4__) || defined(__AMIGA__) || defined(__MINT__))
++#if (defined(_WIN32) || defined(__riscos__) || defined(__HAIKU__) || defined(__BEOS__) || defined(__amigaos4__) || defined(__AMIGA__) || defined(__MINT__) || defined(__PPC__))
+ #undef HAVE_MMAP
+ #endif
+ 
+diff --git a/utils/hashtable.c b/utils/hashtable.c
+index 95e2ba1..14d495c 100644
+--- a/utils/hashtable.c
++++ b/utils/hashtable.c
+@@ -32,7 +32,6 @@
+ #include <stdbool.h>
+ #include <stdlib.h>
+ #include <string.h>
+-#include <zlib.h>
+ #include <errno.h>
+ 
+ #include "utils/log.h"
+@@ -174,80 +173,14 @@ hash_add_inline_plain(struct hash_table *ht, const uint8_t *data, size_t size)
+ 	return res;
+ }
+ 
+-/**
+- * adds key/value pairs to a hash from a compressed memory area
+- */
++/* XENON: gzip-compressed resources are not used in this build (no zlib). */
+ static nserror
+ hash_add_inline_gzip(struct hash_table *ht, const uint8_t *data, size_t size)
+ {
+-	nserror res;
+-	int ret; /* zlib return value */
+-	z_stream strm;
+-	uint8_t s[LINE_BUFFER_SIZE]; /* line buffer */
+-	size_t used = 0; /* number of bytes in buffer in use */
+-	uint8_t *nl;
+-
+-	strm.zalloc = Z_NULL;
+-	strm.zfree = Z_NULL;
+-	strm.opaque = Z_NULL;
+-
+-	strm.next_in = (uint8_t *)data;
+-	strm.avail_in = size;
+-
+-	ret = inflateInit2(&strm, 32 + MAX_WBITS);
+-	if (ret != Z_OK) {
+-		NSLOG(netsurf, INFO, "inflateInit returned %d", ret);
+-		return NSERROR_INVALID;
+-	}
+-
+-	do {
+-		strm.next_out = s + used;
+-		strm.avail_out = sizeof(s) - used;
+-
+-		ret = inflate(&strm, Z_NO_FLUSH);
+-		if ((ret != Z_OK) && (ret != Z_STREAM_END)) {
+-			break;
+-		}
+-
+-		used = sizeof(s) - strm.avail_out;
+-		while (used > 0) {
+-			/* find nl */
+-			for (nl = &s[0]; nl < &s[used]; nl++) {
+-				if (*nl == '\n') {
+-					break;
+-				}
+-			}
+-			if (nl == &s[used]) {
+-				/* no nl found */
+-				break;
+-			}
+-			/* found newline */
+-			*nl = 0; /* null terminate line */
+-			res = process_line(ht, &s[0], nl - &s[0]);
+-			if (res != NSERROR_OK) {
+-				inflateEnd(&strm);
+-				return res;
+-			}
+-
+-			/* move data down */
+-			memmove(&s[0], nl + 1, used - ((nl + 1) - &s[0]) );
+-			used -= ((nl +1) - &s[0]);
+-		}
+-		if (used == sizeof(s)) {
+-			/* entire buffer used and no newline */
+-			NSLOG(netsurf, INFO, "Overlength line");
+-			used = 0;
+-		}
+-	} while (ret != Z_STREAM_END);
+-
+-	inflateEnd(&strm);
+-
+-	if (ret != Z_STREAM_END) {
+-		NSLOG(netsurf, INFO, "inflate returned %d", ret);
+-		return NSERROR_INVALID;
+-	}
+-	return NSERROR_OK;
+-
++	(void)ht;
++	(void)data;
++	(void)size;
++	return NSERROR_INVALID;
+ }
+ 
+ 
+@@ -365,14 +298,14 @@ nserror hash_add_file(struct hash_table *ht, const char *path)
+ {
+ 	nserror res = NSERROR_OK;
+ 	char s[LINE_BUFFER_SIZE]; /* line buffer */
+-	gzFile fp; /* compressed file handle */
++	FILE *fp;
+ 
+ 	if (path == NULL) {
+ 		return NSERROR_BAD_PARAMETER;
+ 	}
+ 
+-	fp = gzopen(path, "r");
+-	if (!fp) {
++	fp = fopen(path, "r");
++	if (fp == NULL) {
+ 		NSLOG(netsurf, INFO,
+ 		      "Unable to open file \"%.100s\": %s", path,
+ 		      strerror(errno));
+@@ -380,9 +313,10 @@ nserror hash_add_file(struct hash_table *ht, const char *path)
+ 		return NSERROR_NOT_FOUND;
+ 	}
+ 
+-	while (gzgets(fp, s, sizeof s)) {
++	while (fgets(s, sizeof s, fp) != NULL) {
+ 		int slen = strlen(s);
+-		s[--slen] = 0;  /* remove \n at end */
++		if (slen > 0 && s[slen - 1] == '\n')
++			s[--slen] = 0;
+ 
+ 		res = process_line(ht, (uint8_t *)s, slen);
+ 		if (res != NSERROR_OK) {
+@@ -390,7 +324,7 @@ nserror hash_add_file(struct hash_table *ht, const char *path)
+ 		}
+ 	}
+ 
+-	gzclose(fp);
++	fclose(fp);
+ 
+ 	return res;
+ }
+diff --git a/utils/messages.c b/utils/messages.c
+index ce48446..f320c02 100644
+--- a/utils/messages.c
++++ b/utils/messages.c
+@@ -31,7 +31,6 @@
+ #include <stdio.h>
+ #include <stdbool.h>
+ #include <string.h>
+-#include <zlib.h>
+ #include <stdarg.h>
+ 
+ #include "utils/log.h"
+diff --git a/utils/nsoption.h b/utils/nsoption.h
+index 134e09e..219d549 100644
+--- a/utils/nsoption.h
++++ b/utils/nsoption.h
+@@ -71,6 +71,8 @@
+ #include "atari/options.h"
+ #elif defined(nsmonkey)
+ #include "monkey/options.h"
++#elif defined(nsxenon)
++#include "xenon/options.h"
+ #elif defined(nswin32)
+ #include "windows/options.h"
+ #elif defined(nsqt)
+@@ -146,6 +148,8 @@ enum nsoption_e {
+ #include "atari/options.h"
+ #elif defined(nsmonkey)
+ #include "monkey/options.h"
++#elif defined(nsxenon)
++#include "xenon/options.h"
+ #elif defined(nswin32)
+ #include "windows/options.h"
+ #elif defined(nsqt)
