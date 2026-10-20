@@ -57,6 +57,11 @@ const char *xenon_tab_url(int index);
 
 /* Scroll offset of the active page, for the redraw call. */
 void xenon_get_active_scroll(int *sx, int *sy);
+/* Scrolls the active page, kept inside its extent; false if it didn't move. */
+bool xenon_scroll_by(int dx, int dy);
+/* The active page's vertical scroll, view height and full height; false
+ * when it all fits. */
+bool xenon_scroll_info(int *y, int *view, int *total);
 bool xenon_is_loading(void);
 
 struct gui_window *xenon_find_window_by_num(uint32_t win_num);

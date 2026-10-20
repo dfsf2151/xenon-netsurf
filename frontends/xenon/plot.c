@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "utils/log.h"
 #include "utils/utf8.h"
@@ -20,6 +21,7 @@
 #include "netsurf/plot_style.h"
 
 #include "xenon/bitmap.h"
+#include "xenon/font.h"
 #include "xenon/plot.h"
 #include "xenon/ui.h"
 #include "xenon/xenon.h"
@@ -29,8 +31,6 @@
 #include "xsdk/kernel.h"
 #include "xsdk/present.h"
 #include "xsdk/log.h"
-
-extern const unsigned char xenon_font8x16[4096];
 
 uint32_t xenon_fb[XENON_WIDTH * XENON_HEIGHT];
 
@@ -42,25 +42,11 @@ static unsigned int stat_polygons;
 static unsigned int stat_texts;
 static unsigned int stat_bitmaps;
 
-#define GLYPH_W 8
-#define GLYPH_H 16
-#define BASELINE 12
-#define CURSOR_SCALE 2
-
 /* libxenon:drivers/console/console.c:60-61, BSD 3-clause, Copyright 2009 Georg Lukas. */
 static uint32_t tiled_index(uint32_t x, uint32_t y, uint32_t width)
 {
 	return ((y >> 5) * 32 * width + ((x >> 5) << 10) + (x & 3) + ((y & 1) << 2) +
 		(((x & 31) >> 2) << 3) + (((y & 31) >> 1) << 6)) ^ ((y & 8) << 2);
-}
-
-/* A pixel's bytes in memory are B, G, R, A (xsdk tests/probe_display.c:29-33). */
-static uint32_t pixel_bgra(uint32_t rgb)
-{
-	uint32_t r = (rgb >> 16) & 0xff;
-	uint32_t g = (rgb >> 8) & 0xff;
-	uint32_t b = rgb & 0xff;
-	return (b << 24) | (g << 16) | (r << 8) | 0xff;
 }
 
 /* NetSurf colours are 0xAABBGGRR (plot_style.h component masks); our
@@ -225,72 +211,6 @@ static void draw_circle(int cx, int cy, int radius, uint32_t colour, bool filled
 		if (2 * (err - x) + 1 > 0) {
 			x--;
 			err += 1 - 2 * x;
-		}
-	}
-}
-
-static size_t xenon_utf8_decode(const char *s, size_t len, uint32_t *cp)
-{
-	const unsigned char c = (unsigned char)s[0];
-
-	if (c < 0x80) {
-		*cp = c;
-		return 1;
-	}
-	if (c >= 0xf0 && len >= 4) {
-		*cp = ((uint32_t)(c & 0x07) << 18) | ((s[1] & 0x3f) << 12) |
-		      ((s[2] & 0x3f) << 6) | (s[3] & 0x3f);
-		return 4;
-	}
-	if (c >= 0xe0 && len >= 3) {
-		*cp = ((uint32_t)(c & 0x0f) << 12) | ((s[1] & 0x3f) << 6) | (s[2] & 0x3f);
-		return 3;
-	}
-	if (c >= 0xc0 && len >= 2) {
-		*cp = ((uint32_t)(c & 0x1f) << 6) | (s[1] & 0x3f);
-		return 2;
-	}
-	*cp = '?';
-	return 1;
-}
-
-static void draw_glyph(int x, int ytop, uint32_t cp, uint32_t colour, bool bold)
-{
-	/* The font is ASCII; map the punctuation a page really uses and show
-	 * a centred dot for list bullets instead of a question mark. */
-	switch (cp) {
-	case 0x00a0: cp = ' '; break;
-	case 0x00a9: cp = 'c'; break;
-	case 0x00ae: cp = 'R'; break;
-	case 0x2013:
-	case 0x2014: cp = '-'; break;
-	case 0x2018:
-	case 0x2019: cp = '\''; break;
-	case 0x201c:
-	case 0x201d: cp = '"'; break;
-	case 0x2026: cp = '.'; break;
-	case 0x20ac: cp = 'E'; break;
-	case 0x2122: cp = 'T'; break;
-	case 0x2022:
-		fill_rect(x + 2, ytop + 7, x + 6, ytop + 10, colour);
-		return;
-	default:
-		if (cp > 0x7e || cp < 0x20)
-			cp = '?';
-		break;
-	}
-
-	const unsigned char *glyph = &xenon_font8x16[cp * GLYPH_H];
-	for (int row = 0; row < GLYPH_H; row++) {
-		unsigned char bits = glyph[row];
-		if (bits == 0)
-			continue;
-		for (int col = 0; col < GLYPH_W; col++) {
-			if (bits & (0x80 >> col)) {
-				plot_pixel(x + col, ytop + row, colour);
-				if (bold)
-					plot_pixel(x + col + 1, ytop + row, colour);
-			}
 		}
 	}
 }
@@ -520,19 +440,20 @@ static nserror xenon_plot_text(const struct redraw_context *ctx,
 			       const struct plot_font_style *fstyle, int x, int y,
 			       const char *text, size_t length)
 {
+	struct xenon_surface surface = {
+		.pixels = xenon_fb + XENON_CHROME_TOP * XENON_WIDTH,
+		.stride = XENON_WIDTH,
+		.clip_x0 = clip.x0,
+		.clip_y0 = clip.y0,
+		.clip_x1 = clip.x1,
+		.clip_y1 = clip.y1,
+	};
+
 	(void)ctx;
 	stat_texts++;
-
-	const bool bold = fstyle->weight >= 600;
-	const int top = y - BASELINE;
-	size_t offset = 0;
-
-	while (offset < length) {
-		uint32_t cp;
-		offset += xenon_utf8_decode(text + offset, length - offset, &cp);
-		draw_glyph(x, top, cp, to_rgb(fstyle->foreground), bold);
-		x += GLYPH_W;
-	}
+	xenon_font_draw(&surface, xenon_font_face_for(fstyle),
+			xenon_font_px_for(fstyle), x, y, text, length,
+			to_rgb(fstyle->foreground));
 	return NSERROR_OK;
 }
 
@@ -551,13 +472,8 @@ static const struct plotter_table plotters = {
 
 const struct plotter_table *xenon_plotters = &plotters;
 
-void xenon_plot_reset(void)
+void xenon_plot_begin(void)
 {
-	memset(xenon_fb, 0xff, sizeof(xenon_fb));
-	clip.x0 = 0;
-	clip.y0 = 0;
-	clip.x1 = XENON_WIDTH;
-	clip.y1 = XENON_PAGE_HEIGHT;
 	stat_rects = 0;
 	stat_lines = 0;
 	stat_polygons = 0;
@@ -565,11 +481,187 @@ void xenon_plot_reset(void)
 	stat_bitmaps = 0;
 }
 
+void xenon_plot_clear(const struct rect *area)
+{
+	for (int y = area->y0; y < area->y1; y++) {
+		uint32_t *row = &xenon_fb[(y + XENON_CHROME_TOP) * XENON_WIDTH];
+		for (int x = area->x0; x < area->x1; x++)
+			row[x] = 0xffffff;
+	}
+	clip = *area;
+}
+
+void xenon_plot_shift_page(int dy)
+{
+	uint32_t *page = &xenon_fb[XENON_CHROME_TOP * XENON_WIDTH];
+	size_t keep = (size_t)(XENON_PAGE_HEIGHT - (dy > 0 ? dy : -dy)) * XENON_WIDTH;
+
+	if (dy > 0)
+		memmove(page, page + (size_t)dy * XENON_WIDTH, keep * 4);
+	else if (dy < 0)
+		memmove(page + (size_t)(-dy) * XENON_WIDTH, page, keep * 4);
+}
+
 void xenon_plot_stats(void)
 {
 	fprintf(stderr, "xenon: plot rects=%u lines=%u polygons=%u texts=%u "
 		"bitmaps=%u\n", stat_rects, stat_lines, stat_polygons,
 		stat_texts, stat_bitmaps);
+}
+
+/* ------------------------------------------------------------------ */
+/* Presenting: page + chrome composed linearly, then tiled             */
+/* ------------------------------------------------------------------ */
+
+/* The page buffer stays as NetSurf drew it; each present copies it here,
+ * draws the chrome over the copy, and tiles the copy to the screen. So
+ * moving the pointer or opening a menu never lays the page out again. */
+static uint32_t compose[XENON_WIDTH * XENON_HEIGHT];
+
+/* For the 1024 pixels of one 32x32 display tile, in the order they sit in
+ * memory, each pixel's offset in a linear 1280-wide buffer from the tile's
+ * corner: the inverse of tiled_index. Writing a tile in memory order keeps
+ * the stores to the write-combined screen sequential. */
+static uint32_t tile_order[1024];
+static int tile_order_y[1024];
+static bool tile_order_ready;
+
+static void make_tile_order(void)
+{
+	for (uint32_t y = 0; y < 32; y++) {
+		for (uint32_t x = 0; x < 32; x++) {
+			uint32_t o = tiled_index(x, y, XENON_WIDTH);
+			tile_order[o] = y * XENON_WIDTH + x;
+			tile_order_y[o] = (int)y;
+		}
+	}
+	tile_order_ready = true;
+}
+
+static inline uint32_t to_screen(uint32_t rgb)
+{
+	return __builtin_bswap32(rgb) | 0xff;
+}
+
+enum { TILES_X = XENON_WIDTH / 32, TILES_Y = (XENON_HEIGHT + 31) / 32 };
+
+static void tile_one(volatile uint32_t *out, const uint32_t *src, int tx, int ty)
+{
+	const uint32_t *corner = src + (size_t)ty * 32 * XENON_WIDTH + tx * 32;
+	volatile uint32_t *tile = out + ((size_t)ty * TILES_X + tx) * 1024;
+	int rows_left = XENON_HEIGHT - ty * 32;
+
+	if (rows_left >= 32) {
+		for (int o = 0; o < 1024; o++)
+			tile[o] = to_screen(corner[tile_order[o]]);
+	} else {
+		for (int o = 0; o < 1024; o++)
+			if (tile_order_y[o] < rows_left)
+				tile[o] = to_screen(corner[tile_order[o]]);
+	}
+}
+
+static void tile_out(volatile uint32_t *out, const uint32_t *src)
+{
+	if (!tile_order_ready)
+		make_tile_order();
+	for (int ty = 0; ty < TILES_Y; ty++)
+		for (int tx = 0; tx < TILES_X; tx++)
+			tile_one(out, src, tx, ty);
+}
+
+/* Writes the tiles that a rectangle touches. */
+static void tile_rect(volatile uint32_t *out, const uint32_t *src,
+		      int x0, int y0, int x1, int y1)
+{
+	if (!tile_order_ready)
+		make_tile_order();
+	if (x0 < 0)
+		x0 = 0;
+	if (y0 < 0)
+		y0 = 0;
+	if (x1 > XENON_WIDTH)
+		x1 = XENON_WIDTH;
+	if (y1 > XENON_HEIGHT)
+		y1 = XENON_HEIGHT;
+	for (int ty = y0 / 32; ty * 32 < y1; ty++)
+		for (int tx = x0 / 32; tx * 32 < x1; tx++)
+			tile_one(out, src, tx, ty);
+}
+
+static void compose_frame(uint32_t *target)
+{
+	memcpy(target, xenon_fb, sizeof(xenon_fb));
+	xenon_overlay_begin_linear(target, XENON_WIDTH, XENON_HEIGHT);
+	xenon_ui_draw();
+}
+
+/* The pointer is drawn into the composed frame only while its tiles are
+ * written, then the pixels under it are put back, so the composed frame
+ * stays pointer-free and a pointer move needs no new compose. */
+enum { CURSOR_W = 30, CURSOR_H = 44, PRESENT_TIMEOUT_MS = 40 };
+
+struct cursor_box {
+	bool shown;
+	int x0, y0, x1, y1;
+};
+
+/* What each front buffer last received. */
+struct buffer_state {
+	uint32_t address;
+	unsigned generation; /* the compose it holds; 0 = unknown */
+	struct cursor_box cursor;
+};
+
+static uint32_t cursor_under[CURSOR_W * CURSOR_H];
+static struct buffer_state buffers[4];
+static unsigned next_buffer_slot;
+static unsigned compose_generation;
+static unsigned present_count;
+static unsigned present_partial;
+static uint64_t present_us_total;
+
+static struct buffer_state *buffer_for(uint32_t address)
+{
+	struct buffer_state *b;
+
+	for (unsigned i = 0; i < sizeof(buffers) / sizeof(buffers[0]); i++)
+		if (buffers[i].address == address)
+			return &buffers[i];
+	b = &buffers[next_buffer_slot++ % (sizeof(buffers) / sizeof(buffers[0]))];
+	b->address = address;
+	b->generation = 0;
+	b->cursor.shown = false;
+	return b;
+}
+
+static void cursor_box_at(struct cursor_box *box, int x, int y)
+{
+	box->shown = true;
+	box->x0 = x;
+	box->y0 = y;
+	box->x1 = x + CURSOR_W > XENON_WIDTH ? XENON_WIDTH : x + CURSOR_W;
+	box->y1 = y + CURSOR_H > XENON_HEIGHT ? XENON_HEIGHT : y + CURSOR_H;
+}
+
+static void cursor_put(const struct cursor_box *box, int x, int y)
+{
+	int w = box->x1 - box->x0;
+
+	for (int y_ = box->y0; y_ < box->y1; y_++)
+		memcpy(&cursor_under[(y_ - box->y0) * CURSOR_W],
+		       &compose[y_ * XENON_WIDTH + box->x0], (size_t)w * 4);
+	xenon_overlay_begin_linear(compose, XENON_WIDTH, XENON_HEIGHT);
+	xenon_overlay_arrow(x, y);
+}
+
+static void cursor_take(const struct cursor_box *box)
+{
+	int w = box->x1 - box->x0;
+
+	for (int y_ = box->y0; y_ < box->y1; y_++)
+		memcpy(&compose[y_ * XENON_WIDTH + box->x0],
+		       &cursor_under[(y_ - box->y0) * CURSOR_W], (size_t)w * 4);
 }
 
 static void dump_framebuffer(const char *name)
@@ -603,325 +695,29 @@ static void dump_framebuffer(const char *name)
 		return;
 	}
 
-	/* Screenshots include the chrome, which normally lives only in the
-	 * tiled present buffer. Draw it into a linear copy for the file. */
+	/* Screenshots include the chrome and the pointer. */
 	{
-		uint32_t *shot = malloc(sizeof(xenon_fb));
-		if (shot != NULL) {
-			memcpy(shot, xenon_fb, sizeof(xenon_fb));
-			xenon_overlay_begin_linear(shot, XENON_WIDTH, XENON_HEIGHT);
-			xenon_ui_draw();
-			fwrite(shot, sizeof(xenon_fb), 1, fp);
-			free(shot);
-		} else {
-			fwrite(xenon_fb, sizeof(xenon_fb), 1, fp);
+		struct cursor_box box = { false, 0, 0, 0, 0 };
+		int cx, cy;
+
+		compose_frame(compose);
+		compose_generation++;
+		if (xenon_ui_cursor(&cx, &cy)) {
+			cursor_box_at(&box, cx, cy);
+			cursor_put(&box, cx, cy);
 		}
+		fwrite(compose, sizeof(compose), 1, fp);
+		if (box.shown)
+			cursor_take(&box);
 	}
 	fclose(fp);
-	fprintf(stderr, "xenon: wrote %s (%u bytes)\n", path, (unsigned)sizeof(xenon_fb));
+	fprintf(stderr, "xenon: wrote %s (%u bytes)\n", path, (unsigned)sizeof(compose));
 }
 
 void xenon_screen_dump(const char *name)
 {
 	dump_framebuffer(name);
 }
-
-/* ------------------------------------------------------------------ */
-/* Chrome overlay: drawn into the presented tile buffer, not the page  */
-/* ------------------------------------------------------------------ */
-
-static uint32_t *overlay_dst;
-static uint32_t overlay_width;
-static uint32_t overlay_height;
-static bool overlay_linear;
-
-void xenon_overlay_begin(uint32_t *dst, uint32_t width, uint32_t height)
-{
-	overlay_dst = dst;
-	overlay_width = width;
-	overlay_height = height;
-	overlay_linear = false;
-}
-
-void xenon_overlay_begin_linear(uint32_t *dst, uint32_t width, uint32_t height)
-{
-	overlay_dst = dst;
-	overlay_width = width;
-	overlay_height = height;
-	overlay_linear = true;
-}
-
-static inline void overlay_pixel(int x, int y, uint32_t rgb)
-{
-	if (overlay_dst == NULL || x < 0 || y < 0 ||
-	    x >= (int)overlay_width || y >= (int)overlay_height)
-		return;
-	if (overlay_linear)
-		overlay_dst[(uint32_t)y * overlay_width + (uint32_t)x] = rgb;
-	else
-		overlay_dst[tiled_index((uint32_t)x, (uint32_t)y,
-					overlay_width)] = pixel_bgra(rgb);
-}
-
-void xenon_overlay_rect(int x0, int y0, int x1, int y1, uint32_t rgb)
-{
-	if (x0 < 0)
-		x0 = 0;
-	if (y0 < 0)
-		y0 = 0;
-	if (x1 > (int)overlay_width)
-		x1 = (int)overlay_width;
-	if (y1 > (int)overlay_height)
-		y1 = (int)overlay_height;
-
-	for (int y = y0; y < y1; y++)
-		for (int x = x0; x < x1; x++)
-			overlay_pixel(x, y, rgb);
-}
-
-void xenon_overlay_text(int x, int ytop, const char *text, uint32_t rgb)
-{
-	for (; *text != '\0'; text++, x += GLYPH_W) {
-		unsigned char c = (unsigned char)*text;
-		if (c < 0x20 || c > 0x7e)
-			c = '?';
-		const unsigned char *glyph = &xenon_font8x16[c * GLYPH_H];
-		for (int row = 0; row < GLYPH_H; row++) {
-			unsigned char bits = glyph[row];
-			if (bits == 0)
-				continue;
-			for (int col = 0; col < GLYPH_W; col++) {
-				if (bits & (0x80 >> col))
-					overlay_pixel(x + col, ytop + row, rgb);
-			}
-		}
-	}
-}
-
-void xenon_overlay_text_scaled(int x, int ytop, const char *text, uint32_t rgb,
-			       int scale)
-{
-	if (scale < 1)
-		scale = 1;
-	for (; *text != '\0'; text++, x += GLYPH_W * scale) {
-		unsigned char c = (unsigned char)*text;
-		if (c < 0x20 || c > 0x7e)
-			c = '?';
-		const unsigned char *glyph = &xenon_font8x16[c * GLYPH_H];
-		for (int row = 0; row < GLYPH_H; row++) {
-			unsigned char bits = glyph[row];
-			if (bits == 0)
-				continue;
-			for (int col = 0; col < GLYPH_W; col++) {
-				if ((bits & (0x80 >> col)) == 0)
-					continue;
-				for (int sy = 0; sy < scale; sy++)
-					for (int sx = 0; sx < scale; sx++)
-						overlay_pixel(x + col * scale + sx,
-							      ytop + row * scale + sy, rgb);
-			}
-		}
-	}
-}
-
-void xenon_overlay_line(int x0, int y0, int x1, int y1, int width, uint32_t rgb)
-{
-	int dx = x1 > x0 ? x1 - x0 : x0 - x1;
-	int dy = y1 > y0 ? y1 - y0 : y0 - y1;
-	int sx = x0 < x1 ? 1 : -1;
-	int sy = y0 < y1 ? 1 : -1;
-	int err = dx - dy;
-	int half = width / 2;
-
-	if (width < 1)
-		width = 1;
-
-	for (;;) {
-		for (int oy = -half; oy < width - half; oy++)
-			for (int ox = -half; ox < width - half; ox++)
-				overlay_pixel(x0 + ox, y0 + oy, rgb);
-		if (x0 == x1 && y0 == y1)
-			break;
-		int e2 = 2 * err;
-		if (e2 > -dy) {
-			err -= dy;
-			x0 += sx;
-		}
-		if (e2 < dx) {
-			err += dx;
-			y0 += sy;
-		}
-	}
-}
-
-void xenon_overlay_disc(int cx, int cy, int radius, uint32_t rgb)
-{
-	if (radius < 0)
-		return;
-	for (int y = -radius; y <= radius; y++) {
-		int x = 0;
-		while ((x + 1) * (x + 1) + y * y <= radius * radius)
-			x++;
-		xenon_overlay_rect(cx - x, cy + y, cx + x + 1, cy + y + 1, rgb);
-	}
-}
-
-void xenon_overlay_ring(int cx, int cy, int radius, int thickness, uint32_t rgb)
-{
-	int inner = radius - thickness;
-	if (inner < 0)
-		inner = 0;
-	for (int y = -radius; y <= radius; y++) {
-		for (int x = -radius; x <= radius; x++) {
-			int d = x * x + y * y;
-			if (d <= radius * radius && d >= inner * inner)
-				overlay_pixel(cx + x, cy + y, rgb);
-		}
-	}
-}
-
-static int round_inset(int dy, int radius)
-{
-	int dx = 0;
-	if (dy < 0)
-		dy = -dy;
-	while (dx < radius && (radius - dx) * (radius - dx) + dy * dy >
-	       radius * radius)
-		dx++;
-	return dx;
-}
-
-static void round_span(int x0, int y0, int x1, int y1, int radius, int y,
-		       int *sx0, int *sx1)
-{
-	int dy = 0;
-
-	if (radius > (x1 - x0) / 2)
-		radius = (x1 - x0) / 2;
-	if (radius > (y1 - y0) / 2)
-		radius = (y1 - y0) / 2;
-	if (radius < 0)
-		radius = 0;
-
-	if (y < y0 + radius)
-		dy = y0 + radius - y;
-	else if (y >= y1 - radius)
-		dy = y - (y1 - radius) + 1;
-
-	*sx0 = x0 + (dy > 0 ? round_inset(dy, radius) : 0);
-	*sx1 = x1 - (dy > 0 ? round_inset(dy, radius) : 0);
-	if (*sx1 < *sx0)
-		*sx1 = *sx0;
-}
-
-void xenon_overlay_round_rect(int x0, int y0, int x1, int y1, int radius,
-			      uint32_t rgb)
-{
-	int sx0, sx1;
-
-	if (x0 < 0)
-		x0 = 0;
-	if (y0 < 0)
-		y0 = 0;
-	if (x1 > (int)overlay_width)
-		x1 = (int)overlay_width;
-	if (y1 > (int)overlay_height)
-		y1 = (int)overlay_height;
-	if (x0 >= x1 || y0 >= y1)
-		return;
-
-	for (int y = y0; y < y1; y++) {
-		round_span(x0, y0, x1, y1, radius, y, &sx0, &sx1);
-		for (int x = sx0; x < sx1; x++)
-			overlay_pixel(x, y, rgb);
-	}
-}
-
-void xenon_overlay_round_frame(int x0, int y0, int x1, int y1, int radius,
-			       int thickness, uint32_t rgb)
-{
-	int ix0 = x0 + thickness;
-	int iy0 = y0 + thickness;
-	int ix1 = x1 - thickness;
-	int iy1 = y1 - thickness;
-	int ir = radius - thickness;
-
-	if (ir < 0)
-		ir = 0;
-
-	for (int y = y0; y < y1; y++) {
-		int ox0, ox1, nx0 = 1, nx1 = 0;
-		round_span(x0, y0, x1, y1, radius, y, &ox0, &ox1);
-		if (y >= iy0 && y < iy1)
-			round_span(ix0, iy0, ix1, iy1, ir, y, &nx0, &nx1);
-
-		for (int x = ox0; x < ox1; x++) {
-			if (x >= nx0 && x < nx1)
-				continue;
-			overlay_pixel(x, y, rgb);
-		}
-	}
-}
-
-void xenon_overlay_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
-			    uint32_t rgb)
-{
-	int minx = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
-	int maxx = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
-	int miny = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
-	int maxy = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
-
-	for (int y = miny; y <= maxy; y++) {
-		for (int x = minx; x <= maxx; x++) {
-			int d1 = (x - x1) * (y0 - y1) - (x0 - x1) * (y - y1);
-			int d2 = (x - x2) * (y1 - y2) - (x1 - x2) * (y - y2);
-			int d3 = (x - x0) * (y2 - y0) - (x2 - x0) * (y - y0);
-			bool neg = d1 < 0 || d2 < 0 || d3 < 0;
-			bool pos = d1 > 0 || d2 > 0 || d3 > 0;
-			if (!(neg && pos))
-				overlay_pixel(x, y, rgb);
-		}
-	}
-}
-
-/* A 12x19 arrow, doubled for the TV. X is the outline, # the fill. */
-static const char *const cursor_shape[] = {
-	"X...........",
-	"XX..........",
-	"X#X.........",
-	"X##X........",
-	"X###X.......",
-	"X####X......",
-	"X#####X.....",
-	"X######X....",
-	"X#######X...",
-	"X########X..",
-	"X#####XXXXX.",
-	"X##X##X.....",
-	"X#X.X##X....",
-	"XX..X##X....",
-	"X....X##X...",
-	".....X##X...",
-	"......X##X..",
-	"......X##X..",
-	".......XX...",
-};
-
-void xenon_overlay_arrow(int x, int y)
-{
-	for (size_t row = 0; row < sizeof(cursor_shape) / sizeof(cursor_shape[0]); row++) {
-		for (int col = 0; cursor_shape[row][col] != '\0'; col++) {
-			if (cursor_shape[row][col] == '.')
-				continue;
-			uint32_t colour = cursor_shape[row][col] == 'X' ? 0x000000 : 0xffffff;
-			for (int sy = 0; sy < CURSOR_SCALE; sy++)
-				for (int sx = 0; sx < CURSOR_SCALE; sx++)
-					overlay_pixel(x + col * CURSOR_SCALE + sx,
-						      y + (int)row * CURSOR_SCALE + sy, colour);
-		}
-	}
-}
-
 
 /* The display stays open between presents: closing it gives XAM's surface
  * back to the screen, so the last presented frame would only last a vblank. */
@@ -948,40 +744,85 @@ static bool screen_ensure_open(void)
 		return false;
 	}
 
+	fprintf(stderr, "xenon: display %ux%u\n", (unsigned)screen_width,
+		(unsigned)screen_height);
 	screen_open = true;
 	return true;
 }
 
-void xenon_screen_present(void)
+bool xenon_screen_present(bool full)
 {
 	uint32_t address = 0;
 	NTSTATUS status;
+	struct timespec t0, t1;
+	struct buffer_state *buffer;
+	struct cursor_box box = { false, 0, 0, 0, 0 };
+	int cx, cy;
+	bool partial;
 
 	if (!screen_ensure_open())
-		return;
+		return true; /* nothing to show on; don't retry forever */
 
-	status = xsdk_present_begin(&address, 1000);
-	if (!NT_SUCCESS(status)) {
-		fprintf(stderr, "xenon: present begin failed 0x%08X\n", (unsigned)status);
-		return;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	if (full || compose_generation == 0) {
+		compose_frame(compose);
+		compose_generation++;
+		if (compose_generation == 0)
+			compose_generation = 1;
 	}
 
-	volatile uint32_t *dst = xsdk_present_pixels(address);
-	for (uint32_t y = 0; y < XENON_HEIGHT && y < screen_height; y++) {
-		for (uint32_t x = 0; x < XENON_WIDTH && x < screen_width; x++) {
-			dst[tiled_index(x, y, screen_width)] =
-				pixel_bgra(xenon_fb[y * XENON_WIDTH + x]);
-		}
+	status = xsdk_present_begin(&address, PRESENT_TIMEOUT_MS);
+	if (!NT_SUCCESS(status))
+		return false;
+
+	volatile uint32_t *out = xsdk_present_pixels(address);
+	buffer = buffer_for(address);
+
+	if (xenon_ui_cursor(&cx, &cy)) {
+		cursor_box_at(&box, cx, cy);
+		cursor_put(&box, cx, cy);
 	}
-	__asm__ __volatile__("sync" ::: "memory");
 
-	xenon_overlay_begin(dst, screen_width, screen_height);
-	xenon_ui_draw();
-	__asm__ __volatile__("sync" ::: "memory");
+	partial = buffer->generation == compose_generation &&
+		  screen_width == XENON_WIDTH && screen_height == XENON_HEIGHT;
+	if (partial) {
+		if (buffer->cursor.shown)
+			tile_rect(out, compose, buffer->cursor.x0, buffer->cursor.y0,
+				  buffer->cursor.x1, buffer->cursor.y1);
+		if (box.shown)
+			tile_rect(out, compose, box.x0, box.y0, box.x1, box.y1);
+		present_partial++;
+	} else if (screen_width == XENON_WIDTH && screen_height == XENON_HEIGHT) {
+		tile_out(out, compose);
+	} else {
+		for (uint32_t y = 0; y < XENON_HEIGHT && y < screen_height; y++)
+			for (uint32_t x = 0; x < XENON_WIDTH && x < screen_width; x++)
+				out[tiled_index(x, y, screen_width)] =
+					to_screen(compose[y * XENON_WIDTH + x]);
+	}
 
+	if (box.shown)
+		cursor_take(&box);
+	buffer->generation = compose_generation;
+	buffer->cursor = box;
+
+	__asm__ __volatile__("sync" ::: "memory");
 	xsdk_present_end();
 
-	fprintf(stderr, "xenon: presented %ux%u\n", (unsigned)screen_width, (unsigned)screen_height);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	present_us_total += (uint64_t)((int64_t)(t1.tv_sec - t0.tv_sec) * 1000000 +
+				       ((int64_t)t1.tv_nsec - (int64_t)t0.tv_nsec) / 1000);
+	present_count++;
+	return true;
+}
+
+void xenon_screen_stats(void)
+{
+	if (present_count > 0)
+		fprintf(stderr, "xenon: %u presents (%u pointer-only), %u us each "
+			"on average\n", present_count, present_partial,
+			(unsigned)(present_us_total / present_count));
+	xenon_font_stats();
 }
 
 void xenon_screen_close(void)

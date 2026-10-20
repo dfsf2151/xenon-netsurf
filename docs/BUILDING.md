@@ -31,6 +31,7 @@ The prebuilt `release/ns360.zip` is the recommended way to try the browser.
 | utf8proc | `f72a4023617e2d879f2ca93086fd02bc7e3149fe` |
 | libjpeg | IJG jpeg-9e |
 | buildsystem | `0005ae300283ff01c2e2b05e7376b3e55dea21f7` |
+| nsgenbind (host tool) | `44c6736937ae17d4065d02959b82813b8f06a51e` |
 
 ## Workspace layout
 
@@ -71,7 +72,18 @@ Edit `netsurf-src/Makefile.config` and set `XSDK_ROOT` and `XENON_PREFIX`. The
 frontend Makefile also reads `XENON_MBEDTLS`, which defaults to
 `third_party/mbedtls-xenon` beside the repository.
 
-## 3. Dependencies
+## 3. nsgenbind
+
+JavaScript is on (`NETSURF_USE_DUKTAPE := YES`), and NetSurf generates its
+Duktape DOM bindings with `nsgenbind`, a host tool. It needs flex and bison:
+
+```sh
+git clone https://github.com/netsurf-browser/nsgenbind.git deps/nsgenbind
+make -C deps/nsgenbind NSSHARED=$PWD/deps/buildsystem PREFIX=$HOME/.local install
+export PATH=$HOME/.local/bin:$PATH
+```
+
+## 4. Dependencies
 
 Clone the revisions from the table above into `deps/`. `build_deps.sh` builds
 the core NetSurf libraries (libwapcaplet, libparserutils, libhubbub, libcss,
@@ -90,7 +102,7 @@ libnsbmp and libnsgif. They were built by hand with the same xsdk compiler:
 This part is the least polished. Check `prefix/lib` for the expected `.a`
 files before building NetSurf.
 
-## 4. mbedTLS Xenon
+## 5. mbedTLS Xenon
 
 ```sh
 cmake -S third_party/mbedtls-xenon -B third_party/mbedtls-xenon/build-xsdk \
@@ -105,7 +117,7 @@ The frontend compiles with
 `third_party/mbedtls-xenon/configs/config-xenon-netsurf.h` and links the static
 libraries from `build-xsdk/library`.
 
-## 5. Build NetSurf
+## 6. Build NetSurf
 
 ```sh
 PKG_CONFIG_PATH=$PWD/prefix/lib/pkgconfig \
@@ -114,17 +126,18 @@ PKG_CONFIG_PATH=$PWD/prefix/lib/pkgconfig \
 
 The result is `netsurf-src/nsxenon` (an ELF with debug symbols).
 
-## 6. Convert to XEX
+## 7. Convert to XEX
 
 ```sh
 python3 /path/to/xsdk/tools/elf2xex.py netsurf-src/nsxenon ns360/default.xex
 ```
 
-Place `ns360/` beside `res/`, `home.html`, `help.html`, `about.html`,
+Place `ns360/` beside `res/` (including `res/fonts/` with the eight Noto
+`.ttf` files, `OFL.txt` and `NOTICE.txt`, and `res/user.css`), `home.html`, `help.html`, `about.html`,
 `cacert.pem`, `mime.types`, `hosts.txt`, `url.txt`, `demo.wav` and `demo.mp3`.
 The prebuilt zip shows the expected layout.
 
-## 7. Package
+## 8. Package
 
 ```sh
 cd dist && rm -f ns360.zip && zip -r -9 ns360.zip ns360

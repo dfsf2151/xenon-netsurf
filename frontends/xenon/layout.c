@@ -1,8 +1,8 @@
 /*
- * Xenon (Xbox 360) font layout: fixed 8x16 cell font.
+ * Xenon (Xbox 360) font layout on the proportional faces in font.c.
  *
- * The plotter draws every glyph in an 8x16 cell, so the metrics here must
- * agree exactly. UTF-8 aware: character offsets are byte offsets.
+ * Measuring and drawing share the same advances and rounding, so text
+ * lands where layout put it.
  *
  * This file is part of NetSurf, http://www.netsurf-browser.org/
  * Licensed under the GNU General Public License, version 2.
@@ -11,41 +11,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "utils/utf8.h"
+#include "utils/errors.h"
 #include "netsurf/plot_style.h"
 #include "netsurf/layout.h"
 
+#include "xenon/font.h"
 #include "xenon/layout.h"
 
-#define CELL_WIDTH 8
-
-static size_t byte_offset_of_char(const char *string, size_t length, size_t char_index)
+static nserror xenon_font_width_cb(const plot_font_style_t *fstyle,
+				   const char *string, size_t length, int *width)
 {
-	size_t offset = 0;
-	size_t chars = 0;
-
-	while (offset < length && chars < char_index) {
-		const unsigned char c = (unsigned char)string[offset];
-		size_t step = 1;
-		if (c >= 0xf0)
-			step = 4;
-		else if (c >= 0xe0)
-			step = 3;
-		else if (c >= 0xc0)
-			step = 2;
-		if (offset + step > length)
-			step = 1;
-		offset += step;
-		chars++;
-	}
-	return offset;
-}
-
-static nserror xenon_font_width(const plot_font_style_t *fstyle,
-				const char *string, size_t length, int *width)
-{
-	(void)fstyle;
-	*width = CELL_WIDTH * (int)utf8_bounded_length(string, length);
+	*width = xenon_font_width(xenon_font_face_for(fstyle),
+				  xenon_font_px_for(fstyle), string, length);
 	return NSERROR_OK;
 }
 
@@ -53,65 +30,46 @@ static nserror xenon_font_position_in_string(const plot_font_style_t *fstyle,
 					     const char *string, size_t length,
 					     int x, size_t *char_offset, int *actual_x)
 {
-	(void)fstyle;
-	size_t index;
-
-	if (x <= 0) {
-		index = 0;
-	} else {
-		index = (size_t)(x / CELL_WIDTH);
-		if (index > utf8_bounded_length(string, length))
-			index = utf8_bounded_length(string, length);
-	}
-
-	*char_offset = byte_offset_of_char(string, length, index);
-	*actual_x = (int)index * CELL_WIDTH;
+	*char_offset = xenon_font_offset_at(xenon_font_face_for(fstyle),
+					    xenon_font_px_for(fstyle), string,
+					    length, x, true, actual_x);
 	return NSERROR_OK;
 }
 
+/* Where to break a line at width x: at the last space that fits, else the
+ * first space after it, else nowhere. */
 static nserror xenon_font_split(const plot_font_style_t *fstyle,
 				const char *string, size_t length,
 				int x, size_t *char_offset, int *actual_x)
 {
-	(void)fstyle;
-	size_t index = (size_t)(x / CELL_WIDTH);
-	size_t chars = utf8_bounded_length(string, length);
+	xenon_face face = xenon_font_face_for(fstyle);
+	int px = xenon_font_px_for(fstyle);
+	int edge;
+	size_t fit = xenon_font_offset_at(face, px, string, length, x, false, &edge);
+	size_t split;
 
-	if (index > chars) {
-		index = chars;
-	} else {
-		size_t offset = byte_offset_of_char(string, length, index);
-		while (index > 0) {
-			size_t prev = byte_offset_of_char(string, length, index - 1);
-			if (string[prev] == ' ' && offset == prev + 1) {
-				break;
-			}
-			/* Walk back to a space character. */
-			if (string[prev] == ' ')
-				break;
-			index--;
-			offset = prev;
-		}
-		if (index == 0) {
-			index = (size_t)(x / CELL_WIDTH);
-			if (index > chars)
-				index = chars;
-			while (index < chars) {
-				size_t offset2 = byte_offset_of_char(string, length, index);
-				if (string[offset2] == ' ')
-					break;
-				index++;
-			}
-		}
+	if (fit >= length) {
+		*char_offset = length;
+		*actual_x = edge;
+		return NSERROR_OK;
 	}
 
-	*char_offset = byte_offset_of_char(string, length, index);
-	*actual_x = (int)index * CELL_WIDTH;
+	split = fit;
+	while (split > 0 && string[split] != ' ')
+		split--;
+	if (split == 0) {
+		split = fit;
+		while (split < length && string[split] != ' ')
+			split++;
+	}
+
+	*char_offset = split;
+	*actual_x = xenon_font_width(face, px, string, split);
 	return NSERROR_OK;
 }
 
 static struct gui_layout_table layout_table = {
-	.width = xenon_font_width,
+	.width = xenon_font_width_cb,
 	.position = xenon_font_position_in_string,
 	.split = xenon_font_split,
 };

@@ -17,23 +17,31 @@ sign in on a BadUpdate console.
 
 | Input | Action |
 |---|---|
-| A | Select / open |
+| A | Select / open; on a text field, open the keyboard |
 | B | Back |
-| X | Options menu |
+| X | Menu |
 | Y | Address / search bar |
-| Left stick | Move pointer |
-| LB / RB | Scroll page |
-| BACK | Home |
+| Left stick / D-pad | Move pointer |
+| Right stick | Scroll smoothly |
+| LB / RB | Scroll a screen |
+| BACK | Speed Dial |
 | START | Quit |
 
-The Options menu contains: New Tab, Reload Page, Home, Close Tab, Play
-demo.wav, Play demo.mp3, Sound Test, Help, Quit.
+The menu contains: New tab, Reload page, Home, Close tab, Play demo.wav, Play
+demo.mp3, Sound test, Help, Quit.
+
+## Typing into pages
+
+Press A on a text field: the keyboard opens with the field's current text.
+Type with A, delete with X, and press Done (or Y) to put the text in the field;
+the form is not sent. Password fields start empty and show dots. Send the form
+with the page's own button. Cookies are kept in `Cookies` beside the XEX, so
+sites stay signed in between runs.
 
 ## Search and address bar
 
 Press Y, type a URL or a search phrase, and press A. Plain text goes to
-DuckDuckGo Lite (`https://lite.duckduckgo.com/lite/?q=...`), which works without
-JavaScript. HTTPS is checked against the bundled Mozilla CA list.
+DuckDuckGo Lite (`https://lite.duckduckgo.com/lite/?q=...`). HTTPS is checked against the bundled Mozilla CA list.
 
 ## Tabs
 
@@ -55,10 +63,12 @@ from web pages.
 
 - Video playback and YouTube.
 - AAC audio.
-- JavaScript.
+- Modern web apps (YouTube, the Instagram feed, ES2015+ frameworks).
+  JavaScript is ES5 only, through Duktape. A script gets 5 seconds.
 - SVG.
-- Arabic and other non-ASCII scripts (the font is ASCII; unknown characters
-  appear as `?`).
+- Arabic and other scripts outside Latin, Greek and Cyrillic.
+- Instagram sign-in: Instagram ignores the plain login form. Public post and
+  reel links work without an account.
 - Robust HTTP timeouts and cancellation.
 
 ## Troubleshooting
@@ -70,4 +80,7 @@ from web pages.
   header but needs a sane starting point.
 - **Audio menu does nothing:** make sure `demo.wav`/`demo.mp3` are beside the
   XEX and that the console's audio output is configured.
-- **Emulator log:** `~/.local/share/Xenia/cache/default.log`.
+- **Emulator log:** `~/.local/share/Xenia/cache/default.log`. Put an empty
+  `debug.txt` beside the XEX for NetSurf's verbose log.
+- **A site is slow or broken with scripts:** list its domain in `nojs.txt`
+  beside the XEX (one per line) to load it with scripts off.

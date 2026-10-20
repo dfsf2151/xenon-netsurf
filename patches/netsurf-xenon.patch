@@ -12,6 +12,113 @@ index d6ba683..6f034f6 100644
  
  # Optional libraries with pkgconfig
  
+diff --git a/content/handlers/html/css.c b/content/handlers/html/css.c
+index 0bc3884..b29f0fa 100644
+--- a/content/handlers/html/css.c
++++ b/content/handlers/html/css.c
+@@ -315,7 +315,15 @@ static void html_css_process_modified_styles(void *pw)
+ 	/* If we failed to process any sheet, schedule a retry */
+ 	if (all_done == false) {
+ 		guit->misc->schedule(1000, html_css_process_modified_styles, c);
++		return;
+ 	}
++
++	/* A modified sheet held the conversion back. When processing it
++	 * started no fetch (an empty <style>, say), nothing else will
++	 * check again, so start the conversion here. */
++	if (!c->conversion_begun && c->base.status == CONTENT_STATUS_LOADING &&
++	    html_can_begin_conversion(c))
++		html_begin_conversion(c);
+ }
+ 
+ 
+diff --git a/content/handlers/html/dom_event.c b/content/handlers/html/dom_event.c
+index 83a84ac..76b4286 100644
+--- a/content/handlers/html/dom_event.c
++++ b/content/handlers/html/dom_event.c
+@@ -577,6 +577,43 @@ static void html_texty_element_update(html_content *htmlc, dom_node *node)
+ /**
+  * callback for DOMNodeInserted end type
+  */
++/**
++ * Whether an element carries an on* attribute, which needs a javascript
++ * context to bind.
++ */
++static bool html_node_has_event_attribute(dom_node *node)
++{
++	dom_namednodemap *map = NULL;
++	dom_ulong length = 0;
++	bool found = false;
++
++	if (dom_node_get_attributes(node, &map) != DOM_NO_ERR || map == NULL)
++		return false;
++
++	if (dom_namednodemap_get_length(map, &length) == DOM_NO_ERR) {
++		for (dom_ulong idx = 0; idx < length && !found; idx++) {
++			dom_attr *attr = NULL;
++			dom_string *name = NULL;
++
++			if (dom_namednodemap_item(map, idx, &attr) != DOM_NO_ERR ||
++			    attr == NULL)
++				continue;
++			if (dom_attr_get_name(attr, &name) == DOM_NO_ERR &&
++			    name != NULL) {
++				const char *text = dom_string_data(name);
++				if (dom_string_byte_length(name) > 2 &&
++				    (text[0] == 'o' || text[0] == 'O') &&
++				    (text[1] == 'n' || text[1] == 'N'))
++					found = true;
++				dom_string_unref(name);
++			}
++			dom_node_unref(attr);
++		}
++	}
++	dom_namednodemap_unref(map);
++	return found;
++}
++
+ static void
+ dom_default_action_DOMNodeInserted_cb(struct dom_event *evt, void *pw)
+ {
+@@ -638,8 +675,11 @@ dom_default_action_DOMNodeInserted_cb(struct dom_event *evt, void *pw)
+ 		}
+ 
+ 		if (htmlc->enable_scripting) {
+-			/* ensure javascript context is available */
+-			if (htmlc->jsthread == NULL) {
++			/* ensure javascript context is available; a page
++			 * without scripts or on* handlers never needs one,
++			 * which saves building a javascript heap for it */
++			if (htmlc->jsthread == NULL &&
++			    html_node_has_event_attribute((dom_node *)node)) {
+ 				union content_msg_data msg_data;
+ 
+ 				msg_data.jsthread = &htmlc->jsthread;
+diff --git a/content/handlers/html/html.c b/content/handlers/html/html.c
+index f92985b..d0fe1a8 100644
+--- a/content/handlers/html/html.c
++++ b/content/handlers/html/html.c
+@@ -72,6 +72,9 @@
+ #include "html/layout.h"
+ #include "html/textselection.h"
+ 
++/* Optional frontend hook: false turns scripting off for a page's URL. */
++bool html_scripting_allowed(struct nsurl *url) __attribute__((weak));
++
+ #define CHUNK 4096
+ 
+ /* Change these to 1 to cause a dump to stderr of the frameset or box
+@@ -501,6 +504,10 @@ html_create_html_data(html_content *c, const http_parameter *params)
+ 	c->jsthread = NULL;
+ 
+ 	c->enable_scripting = nsoption_bool(enable_javascript);
++	/* A frontend may turn scripts off for some sites. */
++	if (c->enable_scripting && html_scripting_allowed != NULL &&
++	    !html_scripting_allowed(content_get_url(&c->base)))
++		c->enable_scripting = false;
+ 	c->base.active = 1; /* The html content itself is active */
+ 
+ 	if (lwc_intern_string("*", SLEN("*"), &c->universal) != lwc_error_ok) {
 diff --git a/content/handlers/html/layout.c b/content/handlers/html/layout.c
 index d3b6d8f..25c8615 100644
 --- a/content/handlers/html/layout.c
@@ -44,6 +151,38 @@ index 950c370..b22eeea 100644
  /**
   * cookie entry.
   *
+diff --git a/desktop/browser_window.c b/desktop/browser_window.c
+index 226741b..3525d01 100644
+--- a/desktop/browser_window.c
++++ b/desktop/browser_window.c
+@@ -1604,6 +1604,13 @@ browser_window_callback(hlcache_handle *c, const hlcache_event *event, void *pw)
+ 			jsthread *thread;
+ 			assert(bw->loading_content == c);
+ 
++			if (bw->jsheap == NULL &&
++			    js_newheap(nsoption_int(script_timeout),
++				       &bw->jsheap) != NSERROR_OK) {
++				bw->jsheap = NULL;
++				break;
++			}
++
+ 			if (js_newthread(bw->jsheap,
+ 					 bw,
+ 					 hlcache_handle_get_content(c),
+@@ -3180,10 +3187,9 @@ browser_window_initialise_common(enum browser_window_create_flags flags,
+ 	nserror err;
+ 	assert(bw);
+ 
+-	/* new javascript context for each window/(i)frame */
+-	err = js_newheap(nsoption_int(script_timeout), &bw->jsheap);
+-	if (err != NSERROR_OK)
+-		return err;
++	/* each window/(i)frame gets its own javascript heap, made when
++	 * its first page asks for a javascript thread */
++	bw->jsheap = NULL;
+ 
+ 	if (flags & BW_CREATE_CLONE) {
+ 		assert(existing != NULL);
 diff --git a/frontends/Makefile.hts b/frontends/Makefile.hts
 index 83c1cfa..bcd0dfa 100644
 --- a/frontends/Makefile.hts

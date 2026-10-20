@@ -30,6 +30,12 @@ enum xenon_output_type {
 	MOUT_PLOT,
 };
 
+#include <stdbool.h>
+
+/* Set when game:\\debug.txt exists: verbose NetSurf logging and window
+ * events go to the log. */
+extern bool xenon_debug_log;
+
 int moutf(enum xenon_output_type mout_type, const char *fmt, ...);
 
 #endif

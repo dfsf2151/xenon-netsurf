@@ -48,7 +48,7 @@ CFLAGS += -D_POSIX_C_SOURCE=200809L \
 # ----------------------------------------------------------------------------
 
 S_FRONTEND := main.c output.c filetype.c schedule.c bitmap.c plot.c browser.c \
-	download.c 401login.c layout.c dispatch.c fetch.c iconv.c compat.c font8x16.c \
+	download.c 401login.c layout.c dispatch.c fetch.c iconv.c compat.c font8x16.c font.c draw.c \
 	http.c input.c ui.c time.c audio.c minimp3_impl.c
 
 # This is the final source build list

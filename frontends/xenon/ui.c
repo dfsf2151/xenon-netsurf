@@ -1,11 +1,11 @@
 /*
- * Xenon browser chrome: dashboard-style top bar, tabs, speed dial,
- * address/search bar, options menu, on-screen keyboard and status bar.
+ * Xenon browser chrome: a dark tab strip and toolbar, a Speed Dial home,
+ * an options drawer, an on-screen keyboard and a status line.
  *
  * The page is drawn by NetSurf into the area between the fixed chrome
- * (xenon_plot_* adds XENON_CHROME_TOP), and this file draws the chrome
- * straight into the presented tile buffer. Moving the pointer therefore
- * never forces the page to be laid out again.
+ * (xenon_plot_* adds XENON_CHROME_TOP). This file draws the chrome over a
+ * copy of the page at each present, so moving the pointer never lays the
+ * page out again.
  *
  * This file is part of NetSurf, http://www.netsurf-browser.org/
  * Licensed under the GNU General Public License, version 2.
@@ -24,6 +24,8 @@
 #include "utils/nsurl.h"
 #include "netsurf/browser_window.h"
 #include "netsurf/mouse.h"
+#include "netsurf/keypress.h"
+#include "netsurf/clipboard.h"
 
 #include "desktop/browser_history.h"
 
@@ -37,54 +39,85 @@
 volatile bool xenon_quit_requested;
 
 enum {
-	CURSOR_SCALE = 2,
-	TOAST_MS = 5000,
+	TOAST_MS = 3500,
 	URL_MAX = 480,
 
 	CHROME_TOP = XENON_CHROME_TOP,
 	CHROME_BOTTOM = XENON_CHROME_BOTTOM,
 	BOTTOM_Y = XENON_HEIGHT - CHROME_BOTTOM,
 
-	ADDR_X0 = 158,
-	ADDR_X1 = 860,
-	ADDR_CY = 45,
-	SEARCH_CX = 832,
+	/* Tab strip. */
+	STRIP_H = 42,
+	TAB_X = 12,
+	TAB_Y = 7,
+	TAB_GAP = 4,
+	TAB_MAX_W = 240,
+	TAB_MIN_W = 120,
+	TAB_LIMIT = 6,
 
-	TAB_Y = 100,
-	TAB_H = 44,
+	/* Toolbar. */
+	BAR_CY = STRIP_H + 30,
+	BTN_R = 21,
+	ADDR_X0 = 226,
+	ADDR_X1 = 1144,
+	ADDR_Y0 = BAR_CY - 21,
+	ADDR_Y1 = BAR_CY + 21,
+	MENU_CX = 1176,
+	MENU2_CX = 1236,
 
-	OSK_X = 114,
-	OSK_Y = 286,
-	OSK_KEY_W = 84,
-	OSK_KEY_H = 52,
+	/* Speed Dial. */
+	DIAL_COUNT = 12,
+	DIAL_COLS = 6,
+	DIAL_W = 170,
+	DIAL_H = 140,
+	DIAL_GAP = 20,
+	DIAL_X = (XENON_WIDTH - (DIAL_COLS * DIAL_W + (DIAL_COLS - 1) * DIAL_GAP)) / 2,
+	DIAL_Y = 330,
+	SEARCH_X0 = 320,
+	SEARCH_X1 = 960,
+	SEARCH_Y0 = 250,
+	SEARCH_Y1 = 302,
+
+	/* On-screen keyboard. */
 	OSK_COLS = 12,
 	OSK_ROWS = 4,
 	OSK_KEYS = OSK_COLS * OSK_ROWS,
 	OSK_ACTIONS = 6,
-	OSK_ACTION_W = 172,
+	OSK_KEY_W = 72,
+	OSK_KEY_H = 54,
+	OSK_KEY_GAP = 8,
+	OSK_X = (XENON_WIDTH - (OSK_COLS * OSK_KEY_W + (OSK_COLS - 1) * OSK_KEY_GAP)) / 2,
+	OSK_Y = 292,
+	OSK_ACTION_Y = OSK_Y + OSK_ROWS * (OSK_KEY_H + OSK_KEY_GAP) + 4,
+	OSK_ACTION_H = 52,
 
-	DIAL_PER_PAGE = 6,
-	DIAL_COUNT = 12,
-	DIAL_X = 67,
-	DIAL_Y = 212,
-	DIAL_W = 176,
-	DIAL_H = 214,
-	DIAL_GAP = 18,
+	/* Options drawer. */
+	DRAWER_X0 = 900,
+	MENU_ROW_H = 46,
 };
 
+/* Palette: a dark chrome with the console's green. */
 enum {
-	C_CHROME = 0xdfeccd,
-	C_CHROME_DARK = 0xc9dcb2,
-	C_CHROME_LINE = 0xb9cda2,
-	C_GREEN = 0x7cb342,
-	C_GREEN_DARK = 0x558b2f,
-	C_INK = 0x1e2a16,
-	C_MUTED = 0x5f6f52,
+	C_STRIP = 0x111418,
+	C_BAR = 0x1e2228,
+	C_BAR_LINE = 0x2c3239,
+	C_FIELD = 0x2b3038,
+	C_FIELD_HOVER = 0x363c45,
+	C_TEXT = 0xeceff3,
+	C_MUTED = 0x9aa3ad,
+	C_FAINT = 0x5d6670,
+	C_ACCENT = 0x7cc242,
+	C_ACCENT_DARK = 0x4f8f25,
+	C_HOVER = 0x343a43,
+	C_CARD = 0x252a31,
+	C_CARD_HOVER = 0x2f353e,
+	C_HOME_TOP = 0x1b2129,
+	C_HOME_BOTTOM = 0x0d1013,
 	C_WHITE = 0xffffff,
-	C_PAGE = 0xf4f8ee,
-	C_CARD_LINE = 0xd3e0c2,
-	C_TAB_IDLE = 0xe8f2dc,
-	C_HOVER = 0xc8e6a0,
+	C_PAD_A = 0x6cc04a,
+	C_PAD_B = 0xe2483d,
+	C_PAD_X = 0x2f8fdd,
+	C_PAD_Y = 0xf3c13a,
 };
 
 static const char osk_chars[OSK_KEYS] = {
@@ -95,7 +128,7 @@ static const char osk_chars[OSK_KEYS] = {
 };
 
 static const char *const osk_action_names[OSK_ACTIONS] = {
-	"Shift", "Space", "Del", "Clear", "Go", "Cancel"
+	"Shift", "Space", "Delete", "Clear", "Go", "Cancel"
 };
 
 static int cursor_x = 640;
@@ -104,6 +137,16 @@ static bool cursor_hidden;
 
 static bool url_mode;
 static bool search_mode;
+/* The keyboard types into a field of the page rather than the address. */
+static bool field_mode;
+/* The field is a password: its text can't be read back, so the keyboard
+ * starts empty and shows dots. */
+static bool field_password;
+static uint64_t last_page_press;
+
+/* The clipboard: what the page last copied, and what a paste puts in. */
+static char *clip_text;
+static size_t clip_len;
 static bool caps;
 static int key_sel;
 static char url_text[URL_MAX + 1];
@@ -113,14 +156,15 @@ static bool menu_mode;
 static int menu_sel;
 static bool a_consumed;
 
-static int dial_page;
-
 static char toast[200];
 static uint64_t toast_until;
+static char status_text[256];
 
 static bool dirty;
+static bool cursor_moved;
 static int last_clock_min = -1;
 static uint64_t last_loading_tick;
+static unsigned loading_phase;
 
 typedef enum {
 	ICON_GLOBE,
@@ -141,51 +185,32 @@ struct dial {
 	const char *label;
 	const char *url;
 	dial_icon icon;
+	uint32_t colour;
 };
 
 static const struct dial dials[DIAL_COUNT] = {
-	{ "Wikipedia", "https://en.wikipedia.org/wiki/Xbox_360", ICON_GLOBE },
-	{ "Search", "", ICON_SEARCH },
-	{ "News", "https://news.ycombinator.com/", ICON_TROPHY },
-	{ "Simple Wiki", "https://simple.wikipedia.org/wiki/Web_browser", ICON_PEOPLE },
-	{ "Pictures", "https://commons.wikimedia.org/wiki/Main_Page", ICON_PICTURE },
-	{ "Help", "file:///game:/help.html", ICON_HELP },
-	{ "YouTube", "https://www.youtube.com/", ICON_PLAY },
-	{ "Xbox 360", "https://en.wikipedia.org/wiki/Xbox_360", ICON_ORB },
-	{ "NetSurf", "https://www.netsurf-browser.org/", ICON_N },
-	{ "HTML", "https://en.wikipedia.org/wiki/HTML", ICON_CODE },
-	{ "Example", "https://example.com/", ICON_E },
-	{ "About", "file:///game:/about.html", ICON_INFO },
+	{ "Wikipedia", "https://en.wikipedia.org/wiki/Xbox_360", ICON_GLOBE, 0x3b78c4 },
+	{ "Search", "", ICON_SEARCH, 0x5aa83a },
+	{ "Hacker News", "https://news.ycombinator.com/", ICON_TROPHY, 0xe8892b },
+	{ "Simple Wiki", "https://simple.wikipedia.org/wiki/Web_browser", ICON_PEOPLE, 0x3f9d72 },
+	{ "Pictures", "https://commons.wikimedia.org/wiki/Main_Page", ICON_PICTURE, 0x2f9fa3 },
+	{ "Help", "file:///game:/help.html", ICON_HELP, 0x6b7a8a },
+	{ "YouTube", "https://www.youtube.com/", ICON_PLAY, 0xe0332b },
+	{ "Xbox 360", "https://en.wikipedia.org/wiki/Xbox_360", ICON_ORB, 0x6aa82f },
+	{ "NetSurf", "https://www.netsurf-browser.org/", ICON_N, 0xd9692b },
+	{ "HTML", "https://en.wikipedia.org/wiki/HTML", ICON_CODE, 0xd8492a },
+	{ "Example", "https://example.com/", ICON_E, 0x7b6fc6 },
+	{ "About", "file:///game:/about.html", ICON_INFO, 0x3b78c4 },
 };
 
 static const char *const menu_items[] = {
-	"New Tab", "Reload Page", "Home", "Close Tab",
-	"Play demo.wav", "Play demo.mp3", "Sound Test", "Help", "Quit"
+	"New tab", "Reload page", "Home", "Close tab",
+	"Play demo.wav", "Play demo.mp3", "Sound test", "Help", "Quit"
 };
 #define MENU_ITEMS ((int)(sizeof(menu_items) / sizeof(menu_items[0])))
 
-static const int chrome_btn_x[5] = { 900, 954, 1008, 1062, 1116 };
-
-static int tab_width(void)
-{
-	int n = xenon_tab_count();
-	int width;
-
-	if (n < 1)
-		return 220;
-	width = (1000 - (n - 1) * 6) / n;
-	if (width > 220)
-		width = 220;
-	if (width < 120)
-		width = 120;
-	return width;
-}
-
-static int plus_center_x(void)
-{
-	int n = xenon_tab_count();
-	return 16 + n * (tab_width() + 6) + 18;
-}
+enum { BTN_BACK, BTN_FORWARD, BTN_RELOAD, BTN_HOME, BTN_COUNT };
+static const int bar_btn_x[BTN_COUNT] = { 34, 84, 134, 184 };
 
 static uint64_t now_ms(void)
 {
@@ -193,6 +218,8 @@ static uint64_t now_ms(void)
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
+
+static int hover_key(int x, int y);
 
 static void set_dirty(void)
 {
@@ -204,11 +231,20 @@ void xenon_ui_chrome_changed(void)
 	set_dirty();
 }
 
-bool xenon_ui_dirty_take(void)
+int xenon_ui_dirty_take(void)
 {
-	bool was = dirty;
+	int flags = (dirty ? XENON_UI_DIRTY_FULL : 0) |
+		    (cursor_moved ? XENON_UI_DIRTY_CURSOR : 0);
 	dirty = false;
-	return was;
+	cursor_moved = false;
+	return flags;
+}
+
+bool xenon_ui_cursor(int *x, int *y)
+{
+	*x = cursor_x;
+	*y = cursor_y;
+	return !cursor_hidden && !menu_mode && !url_mode;
 }
 
 void xenon_ui_set_cursor(int x, int y)
@@ -222,9 +258,15 @@ void xenon_ui_set_cursor(int x, int y)
 	if (y > XENON_HEIGHT - 1)
 		y = XENON_HEIGHT - 1;
 	if (x != cursor_x || y != cursor_y) {
+		int before = hover_key(cursor_x, cursor_y);
 		cursor_x = x;
 		cursor_y = y;
-		set_dirty();
+		/* Only a change of what is under the pointer redraws the
+		 * chrome; otherwise just the pointer moves. */
+		if (hover_key(x, y) != before)
+			set_dirty();
+		else
+			cursor_moved = true;
 	}
 }
 
@@ -237,15 +279,24 @@ void xenon_ui_toast(const char *text)
 	set_dirty();
 }
 
+void xenon_ui_status(const char *text)
+{
+	if (text == NULL)
+		text = "";
+	if (strcmp(text, status_text) == 0)
+		return;
+	snprintf(status_text, sizeof(status_text), "%s", text);
+	set_dirty();
+}
+
 void xenon_ui_init(void)
 {
 	url_text[0] = '\0';
 	url_len = 0;
 	cursor_x = 640;
-	cursor_y = 310;
+	cursor_y = 360;
 	key_sel = 0;
 	menu_sel = 0;
-	xenon_ui_toast("A open   B back   X options   Y search");
 }
 
 /* ------------------------------------------------------------------ */
@@ -266,6 +317,31 @@ static bool on_home(void)
 {
 	int index = active_tab();
 	return index < 0 || xenon_tab_is_home(index);
+}
+
+static int tab_width(void)
+{
+	int n = xenon_tab_count();
+	int width;
+
+	if (n < 1)
+		return TAB_MAX_W;
+	width = (1000 - (n - 1) * TAB_GAP) / n;
+	if (width > TAB_MAX_W)
+		width = TAB_MAX_W;
+	if (width < TAB_MIN_W)
+		width = TAB_MIN_W;
+	return width;
+}
+
+static int tab_x0(int index)
+{
+	return TAB_X + index * (tab_width() + TAB_GAP);
+}
+
+static int plus_center_x(void)
+{
+	return tab_x0(xenon_tab_count()) + 18;
 }
 
 static bool looks_like_url(const char *text)
@@ -360,10 +436,8 @@ static void go_url(const char *text)
 		if (xenon_audio_play_file(path)) {
 			url_mode = false;
 			cursor_hidden = false;
-			xenon_ui_toast(xenon_audio_status());
-		} else {
-			xenon_ui_toast(xenon_audio_status());
 		}
+		xenon_ui_toast(xenon_audio_status());
 		return;
 	}
 
@@ -383,7 +457,8 @@ static void go_url(const char *text)
 	if (navigation_ok(error)) {
 		url_mode = false;
 		cursor_hidden = false;
-		xenon_ui_toast(search ? "Searching..." : "Loading...");
+		xenon_ui_status(search ? "Searching\xe2\x80\xa6" : "Loading\xe2\x80\xa6");
+		set_dirty();
 	}
 }
 
@@ -414,6 +489,7 @@ static void open_url_bar(bool clear)
 	}
 
 	url_mode = true;
+	field_mode = false;
 	cursor_hidden = true;
 	key_sel = 0;
 	set_dirty();
@@ -432,14 +508,153 @@ static void url_backspace(void)
 {
 	if (url_len == 0)
 		return;
-	url_text[--url_len] = '\0';
+	/* Drop a whole UTF-8 character. */
+	do
+		url_len--;
+	while (url_len > 0 && ((unsigned char)url_text[url_len] & 0xc0) == 0x80);
+	url_text[url_len] = '\0';
 	set_dirty();
 }
 
 static void close_url_bar(void)
 {
 	url_mode = false;
+	field_mode = false;
+	field_password = false;
 	cursor_hidden = false;
+	set_dirty();
+}
+
+static void clip_set(const char *text, size_t len)
+{
+	char *copy = malloc(len + 1);
+
+	if (copy == NULL)
+		return;
+	memcpy(copy, text, len);
+	copy[len] = '\0';
+	free(clip_text);
+	clip_text = copy;
+	clip_len = len;
+}
+
+static void clipboard_get(char **buffer, size_t *length)
+{
+	*buffer = NULL;
+	*length = 0;
+	if (clip_text == NULL)
+		return;
+	*buffer = malloc(clip_len + 1);
+	if (*buffer == NULL)
+		return;
+	memcpy(*buffer, clip_text, clip_len + 1);
+	*length = clip_len;
+}
+
+static void clipboard_set(const char *buffer, size_t length,
+			  nsclipboard_styles styles[], int n_styles)
+{
+	(void)styles;
+	(void)n_styles;
+	clip_set(buffer, length);
+}
+
+static struct gui_clipboard_table clipboard_table = {
+	.get = clipboard_get,
+	.set = clipboard_set,
+};
+
+struct gui_clipboard_table *xenon_clipboard_table = &clipboard_table;
+
+/* Whether text is nothing but the bullets a password field shows. */
+static bool all_bullets(const char *text, size_t len)
+{
+	if (len == 0 || len % 3 != 0)
+		return false;
+	for (size_t i = 0; i < len; i += 3)
+		if (memcmp(text + i, "\xe2\x80\xa2", 3) != 0)
+			return false;
+	return true;
+}
+
+/* The focused field's text, through select-all and copy. */
+static size_t field_read(char *out, size_t size)
+{
+	size_t n = 0;
+
+	clip_set("", 0);
+	browser_window_key_press(xenon_bw, NS_KEY_SELECT_ALL);
+	browser_window_key_press(xenon_bw, NS_KEY_COPY_SELECTION);
+	browser_window_key_press(xenon_bw, NS_KEY_TEXT_END);
+	if (clip_text != NULL) {
+		n = clip_len < size - 1 ? clip_len : size - 1;
+		memcpy(out, clip_text, n);
+	}
+	out[n] = '\0';
+	return n;
+}
+
+/* Done: put the keyboard's text in the field in place of what was there. */
+static void field_commit(void)
+{
+	if (xenon_bw == NULL)
+		return;
+	browser_window_key_press(xenon_bw, NS_KEY_SELECT_ALL);
+	if (url_len > 0) {
+		clip_set(url_text, url_len);
+		browser_window_key_press(xenon_bw, NS_KEY_PASTE);
+	} else {
+		browser_window_key_press(xenon_bw, NS_KEY_DELETE_LEFT);
+	}
+	browser_window_key_press(xenon_bw, NS_KEY_TEXT_END);
+	clip_set("", 0);
+}
+
+/* Go: an address or search for the address bar. For a page field, Done:
+ * the text goes in and the form stays as it is, so the next field can be
+ * filled before the page's own button sends it. */
+static void keyboard_go(void)
+{
+	if (field_mode) {
+		field_commit();
+		close_url_bar();
+		return;
+	}
+	go_url(url_text);
+}
+
+void xenon_ui_caret(bool shown)
+{
+	if (!shown || url_mode || menu_mode || xenon_bw == NULL)
+		return;
+	if (now_ms() - last_page_press > 1500)
+		return;
+	last_page_press = 0;
+
+	/* A field was just picked: start from its text. A password field
+	 * copies as bullets; an empty one shows its kind once a character is
+	 * in it, so try one and take it out again. */
+	url_len = field_read(url_text, sizeof(url_text));
+	field_password = all_bullets(url_text, url_len);
+	if (url_len == 0) {
+		char probe[16];
+		browser_window_key_press(xenon_bw, 'x');
+		field_password = all_bullets(probe, field_read(probe, sizeof(probe)));
+		browser_window_key_press(xenon_bw, NS_KEY_SELECT_ALL);
+		browser_window_key_press(xenon_bw, NS_KEY_DELETE_LEFT);
+	}
+	if (field_password) {
+		url_len = 0;
+		url_text[0] = '\0';
+	}
+	clip_set("", 0);
+
+	toast[0] = '\0';
+	search_mode = false;
+	field_mode = true;
+	url_mode = true;
+	cursor_hidden = true;
+	key_sel = 0;
 	set_dirty();
 }
 
@@ -470,7 +685,7 @@ static void activate_key(void)
 		set_dirty();
 		break;
 	case 4:
-		go_url(url_text);
+		keyboard_go();
 		break;
 	case 5:
 		close_url_bar();
@@ -490,30 +705,25 @@ static void key_move(int dx, int dy)
 			row += dy;
 			if (row < 0)
 				row = 0;
-			if (row > OSK_ROWS - 1)
-				row = OSK_ROWS - 1;
+			if (row > OSK_ROWS - 1) {
+				/* Down from the last row reaches the actions. */
+				int action = col * OSK_ACTIONS / OSK_COLS;
+				key_sel = OSK_KEYS + action;
+				set_dirty();
+				return;
+			}
 			key_sel = row * OSK_COLS + col;
 		} else if (dx != 0) {
-			col += dx;
-			if (col < 0)
-				col = OSK_COLS - 1;
-			if (col > OSK_COLS - 1)
-				col = 0;
+			col = (col + dx + OSK_COLS) % OSK_COLS;
 			key_sel = row * OSK_COLS + col;
 		}
 	} else {
 		int action = key_sel - OSK_KEYS;
 		if (dy < 0) {
-			key_sel = (OSK_ROWS - 1) * OSK_COLS +
-				  (action * 2 < OSK_COLS ? action * 2 : OSK_COLS - 1);
-		} else if (dy > 0) {
-			/* stay on the action row */
+			int c = action * OSK_COLS / OSK_ACTIONS + 1;
+			key_sel = (OSK_ROWS - 1) * OSK_COLS + (c < OSK_COLS ? c : OSK_COLS - 1);
 		} else if (dx != 0) {
-			action += dx;
-			if (action < 0)
-				action = OSK_ACTIONS - 1;
-			if (action >= OSK_ACTIONS)
-				action = 0;
+			action = (action + dx + OSK_ACTIONS) % OSK_ACTIONS;
 			key_sel = OSK_KEYS + action;
 		}
 	}
@@ -538,11 +748,73 @@ static bool over_circle(int x, int y, int cx, int cy, int radius)
 
 static void dial_rect(int index, int *x0, int *y0, int *x1, int *y1)
 {
-	int slot = index % DIAL_PER_PAGE;
-	*x0 = DIAL_X + slot * (DIAL_W + DIAL_GAP);
-	*y0 = DIAL_Y;
+	int col = index % DIAL_COLS;
+	int row = index / DIAL_COLS;
+	*x0 = DIAL_X + col * (DIAL_W + DIAL_GAP);
+	*y0 = DIAL_Y + row * (DIAL_H + DIAL_GAP);
 	*x1 = *x0 + DIAL_W;
 	*y1 = *y0 + DIAL_H;
+}
+
+/* What the pointer is over, as far as drawing goes: two positions with the
+ * same key draw the same chrome. */
+static int hover_key(int x, int y)
+{
+	int n = xenon_tab_count();
+	int width = tab_width();
+
+	if (url_mode || menu_mode)
+		return 0;
+	if (y < STRIP_H) {
+		for (int i = 0; i < n; i++) {
+			int x0 = tab_x0(i);
+			if (point_in(x, y, x0, TAB_Y, x0 + width, STRIP_H))
+				return 100 + i * 2 +
+				       (over_circle(x, y, x0 + width - 18, TAB_Y + 18, 12) ? 1 : 0);
+		}
+		return over_circle(x, y, plus_center_x(), STRIP_H / 2 + 3, 18) ? 200 : 1;
+	}
+	if (y < CHROME_TOP) {
+		for (int i = 0; i < BTN_COUNT; i++)
+			if (over_circle(x, y, bar_btn_x[i], BAR_CY, BTN_R + 4))
+				return 300 + i;
+		if (point_in(x, y, ADDR_X0, ADDR_Y0, ADDR_X1, ADDR_Y1))
+			return 310;
+		if (over_circle(x, y, MENU_CX, BAR_CY, BTN_R + 4))
+			return 311;
+		if (over_circle(x, y, MENU2_CX, BAR_CY, BTN_R + 4))
+			return 312;
+		return 2;
+	}
+	if (y >= BOTTOM_Y)
+		return 3;
+	if (on_home()) {
+		if (point_in(x, y, SEARCH_X0, SEARCH_Y0, SEARCH_X1, SEARCH_Y1))
+			return 400;
+		for (int i = 0; i < DIAL_COUNT; i++) {
+			int x0, y0, x1, y1;
+			dial_rect(i, &x0, &y0, &x1, &y1);
+			if (point_in(x, y, x0, y0, x1, y1))
+				return 500 + i;
+		}
+	}
+	return 4;
+}
+
+static void new_tab(void)
+{
+	if (xenon_tab_count() >= TAB_LIMIT)
+		xenon_ui_toast("Six tabs is the limit");
+	else
+		xenon_tab_new();
+}
+
+static void open_menu(void)
+{
+	toast[0] = '\0';
+	menu_mode = true;
+	menu_sel = 0;
+	set_dirty();
 }
 
 static void handle_tabs_click(int x, int y)
@@ -551,10 +823,10 @@ static void handle_tabs_click(int x, int y)
 	int width = tab_width();
 
 	for (int i = 0; i < n; i++) {
-		int x0 = 16 + i * (width + 6);
-		if (x < x0 || x >= x0 + width || y < TAB_Y || y >= TAB_Y + TAB_H)
+		int x0 = tab_x0(i);
+		if (x < x0 || x >= x0 + width || y < TAB_Y || y >= STRIP_H)
 			continue;
-		if (x >= x0 + width - 26 && i == active_tab()) {
+		if (x >= x0 + width - 32 && i == active_tab()) {
 			xenon_tab_close(i);
 			if (xenon_tab_count() == 0)
 				xenon_tab_new();
@@ -564,42 +836,31 @@ static void handle_tabs_click(int x, int y)
 		return;
 	}
 
-	if (over_circle(x, y, plus_center_x(), TAB_Y + 22, 22)) {
-		if (n >= 6) {
-			xenon_ui_toast("Six tabs is the limit");
-		} else {
-			xenon_tab_new();
-		}
-	}
+	if (over_circle(x, y, plus_center_x(), STRIP_H / 2 + 3, 18))
+		new_tab();
 }
 
 static void handle_chrome_click(int x, int y)
 {
-	enum { BTN_BACK, BTN_FORWARD, BTN_RELOAD, BTN_HOME, BTN_MENU };
-
-	if (point_in(x, y, ADDR_X0, 20, ADDR_X1, 70)) {
-		open_url_bar(false);
-		return;
-	}
-	if (over_circle(x, y, SEARCH_CX, ADDR_CY, 24)) {
-		open_url_bar(true);
-		return;
-	}
-	if (y >= TAB_Y && y < TAB_Y + TAB_H) {
+	if (y < STRIP_H) {
 		handle_tabs_click(x, y);
 		return;
 	}
-	if (over_circle(x, y, 44, 46, 28)) {
-		go_home();
+	if (point_in(x, y, ADDR_X0, ADDR_Y0, ADDR_X1, ADDR_Y1)) {
+		open_url_bar(false);
 		return;
 	}
-	if (over_circle(x, y, 118, 46, 30)) {
-		go_home();
+	if (over_circle(x, y, MENU_CX, BAR_CY, BTN_R + 4)) {
+		open_url_bar(true);
+		return;
+	}
+	if (over_circle(x, y, MENU2_CX, BAR_CY, BTN_R + 4)) {
+		open_menu();
 		return;
 	}
 
-	for (int i = 0; i < 5; i++) {
-		if (!over_circle(x, y, chrome_btn_x[i], 46, 26))
+	for (int i = 0; i < BTN_COUNT; i++) {
+		if (!over_circle(x, y, bar_btn_x[i], BAR_CY, BTN_R + 4))
 			continue;
 		switch (i) {
 		case BTN_BACK:
@@ -617,12 +878,6 @@ static void handle_chrome_click(int x, int y)
 		case BTN_HOME:
 			go_home();
 			break;
-		case BTN_MENU:
-			toast[0] = '\0';
-			menu_mode = true;
-			menu_sel = 0;
-			set_dirty();
-			break;
 		}
 		return;
 	}
@@ -630,40 +885,20 @@ static void handle_chrome_click(int x, int y)
 
 static void handle_dial_click(int x, int y)
 {
-	if (over_circle(x, y, 30, 319, 26)) {
-		if (dial_page > 0) {
-			dial_page--;
-			set_dirty();
-		}
-		return;
-	}
-	if (over_circle(x, y, 1250, 319, 26)) {
-		if (dial_page < (DIAL_COUNT / DIAL_PER_PAGE) - 1) {
-			dial_page++;
-			set_dirty();
-		}
+	if (point_in(x, y, SEARCH_X0, SEARCH_Y0, SEARCH_X1, SEARCH_Y1)) {
+		open_url_bar(true);
 		return;
 	}
 
-	for (int i = 0; i < DIAL_PER_PAGE; i++) {
-		int index = dial_page * DIAL_PER_PAGE + i;
+	for (int i = 0; i < DIAL_COUNT; i++) {
 		int x0, y0, x1, y1;
-		dial_rect(index, &x0, &y0, &x1, &y1);
+		dial_rect(i, &x0, &y0, &x1, &y1);
 		if (!point_in(x, y, x0, y0, x1, y1))
 			continue;
-		if (dials[index].url[0] == '\0') {
+		if (dials[i].url[0] == '\0')
 			open_url_bar(true);
-		} else {
-			go_url(dials[index].url);
-		}
-		return;
-	}
-}
-
-static void handle_bottom_click(int x, int y)
-{
-	if (over_circle(x, y, 1104, 698, 22)) {
-		go_url("file:///game:/help.html");
+		else
+			go_url(dials[i].url);
 		return;
 	}
 }
@@ -674,10 +909,7 @@ static void menu_activate(void)
 
 	switch (menu_sel) {
 	case 0:
-		if (xenon_tab_count() >= 6)
-			xenon_ui_toast("Six tabs is the limit");
-		else
-			xenon_tab_new();
+		new_tab();
 		break;
 	case 1:
 		if (xenon_bw != NULL)
@@ -707,7 +939,7 @@ static void menu_activate(void)
 		break;
 	case 6:
 		if (xenon_audio_play_tone(660, 1200))
-			xenon_ui_toast("Playing 660 Hz test tone");
+			xenon_ui_toast("Playing a 660 Hz test tone");
 		else
 			xenon_ui_toast("Audio not available");
 		break;
@@ -744,8 +976,10 @@ void xenon_ui_update(void)
 		set_dirty();
 	}
 
-	if (xenon_is_loading() && now - last_loading_tick > 250) {
+	/* The progress bar moves at 10 frames a second while loading. */
+	if (xenon_is_loading() && now - last_loading_tick > 100) {
 		last_loading_tick = now;
+		loading_phase++;
 		set_dirty();
 	}
 
@@ -791,9 +1025,15 @@ void xenon_ui_update(void)
 		if (xenon_input_pressed(XB_X))
 			url_backspace();
 		if (xenon_input_pressed(XB_Y))
-			go_url(url_text);
+			keyboard_go();
 		if (xenon_input_pressed(XB_B))
 			close_url_bar();
+		if (xenon_input_pressed(XB_LB)) {
+			caps = !caps;
+			set_dirty();
+		}
+		if (xenon_input_pressed(XB_RB))
+			url_insert(' ');
 		return;
 	}
 
@@ -824,10 +1064,7 @@ void xenon_ui_update(void)
 		return;
 	}
 	if (xenon_input_pressed(XB_X)) {
-		toast[0] = '\0';
-		menu_mode = true;
-		menu_sel = 0;
-		set_dirty();
+		open_menu();
 		return;
 	}
 	if (xenon_input_pressed(XB_BACK)) {
@@ -842,25 +1079,38 @@ void xenon_ui_update(void)
 
 	if (xenon_input_pressed(XB_B))
 		browser_window_history_back(xenon_bw, false);
-	if (xenon_input_pressed(XB_LB))
-		browser_window_scroll_at_point(xenon_bw, 600,
-					       XENON_PAGE_HEIGHT / 2, 0,
-					       -(XENON_PAGE_HEIGHT - 70));
-	if (xenon_input_pressed(XB_RB))
-		browser_window_scroll_at_point(xenon_bw, 600,
-					       XENON_PAGE_HEIGHT / 2, 0,
-					       XENON_PAGE_HEIGHT - 70);
+	/* A box under the pointer that scrolls takes the scroll first; the
+	 * page itself scrolls in the frontend. */
+	if (!on_home()) {
+		int page = XENON_PAGE_HEIGHT - 70;
+		int sdx = 0;
+		int sdy = 0;
+
+		if (xenon_input_pressed(XB_LB))
+			sdy = -page;
+		if (xenon_input_pressed(XB_RB))
+			sdy = page;
+		if (sdy != 0 &&
+		    !browser_window_scroll_at_point(xenon_bw, cursor_x,
+						    cursor_y - CHROME_TOP, 0, sdy))
+			xenon_scroll_by(0, sdy);
+
+		xenon_input_scroll(&sdx, &sdy);
+		if (sdx != 0 || sdy != 0)
+			xenon_scroll_by(sdx, sdy);
+	}
 
 	if (xenon_input_pressed(XB_A)) {
 		a_consumed = true;
 		if (cursor_y < CHROME_TOP)
 			handle_chrome_click(cursor_x, cursor_y);
 		else if (cursor_y >= BOTTOM_Y)
-			handle_bottom_click(cursor_x, cursor_y);
+			; /* the status line has nothing to press */
 		else if (on_home())
 			handle_dial_click(cursor_x, cursor_y);
 		else {
 			a_consumed = false;
+			last_page_press = now_ms();
 			browser_window_mouse_click(xenon_bw, BROWSER_MOUSE_PRESS_1,
 						   cursor_x,
 						   cursor_y - CHROME_TOP);
@@ -881,88 +1131,135 @@ void xenon_ui_update(void)
 /* Drawing helpers                                                    */
 /* ------------------------------------------------------------------ */
 
-static void text_at(int x, int y, const char *text, uint32_t colour)
+static int text(int x, int y, const char *s, uint32_t colour, int px)
 {
-	xenon_overlay_text(x, y, text, colour);
+	return xenon_overlay_text(x, y, s, colour, px, XENON_TEXT_REGULAR);
 }
 
-static void text_bold(int x, int y, const char *text, uint32_t colour)
+static int text_b(int x, int y, const char *s, uint32_t colour, int px)
 {
-	xenon_overlay_text(x, y, text, colour);
-	xenon_overlay_text(x + 1, y, text, colour);
+	return xenon_overlay_text(x, y, s, colour, px, XENON_TEXT_BOLD);
 }
 
-static void text_centre(int cx, int y, const char *text, uint32_t colour,
-			int scale)
+static void text_centre(int cx, int y, const char *s, uint32_t colour, int px,
+			int weight)
 {
-	int width = (int)strlen(text) * 8 * scale;
-	if (width > 0)
-		xenon_overlay_text_scaled(cx - width / 2, y, text, colour, scale);
+	int width = xenon_overlay_text_width(s, px, weight);
+	xenon_overlay_text(cx - width / 2, y, s, colour, px, weight);
 }
 
-static void text_right(int right, int y, const char *text, uint32_t colour)
+static void text_right(int right, int y, const char *s, uint32_t colour, int px)
 {
-	int width = (int)strlen(text) * 8;
-	xenon_overlay_text(right - width, y, text, colour);
+	int width = xenon_overlay_text_width(s, px, XENON_TEXT_REGULAR);
+	xenon_overlay_text(right - width, y, s, colour, px, XENON_TEXT_REGULAR);
 }
 
-static void badge(int cx, int cy, const char *label, uint32_t fill,
-		  uint32_t ink)
+static uint32_t pad_colour(const char *label)
 {
-	xenon_overlay_disc(cx, cy, 11, fill);
-	text_centre(cx, cy - 8, label, ink, 1);
+	switch (label[0]) {
+	case 'A':
+		return C_PAD_A;
+	case 'B':
+		return label[1] == '\0' ? C_PAD_B : C_FIELD;
+	case 'X':
+		return C_PAD_X;
+	case 'Y':
+		return C_PAD_Y;
+	default:
+		return C_FIELD;
+	}
+}
+
+/* A controller button: a coloured disc for A/B/X/Y, a pill for the rest.
+ * Returns the right edge. */
+static int pad_glyph(int x, int cy, const char *label)
+{
+	uint32_t fill = pad_colour(label);
+	int len = (int)strlen(label);
+
+	if (len == 1) {
+		xenon_overlay_disc(x + 11, cy, 11, fill);
+		text_centre(x + 11, cy + 5, label,
+			    label[0] == 'Y' ? 0x2a2208 : C_WHITE, 14, XENON_TEXT_BOLD);
+		return x + 22;
+	}
+	{
+		int w = xenon_overlay_text_width(label, 12, XENON_TEXT_BOLD) + 16;
+		xenon_overlay_round_rect(x, cy - 10, x + w, cy + 10, 10, fill);
+		text_centre(x + w / 2, cy + 4, label, C_TEXT, 12, XENON_TEXT_BOLD);
+		return x + w;
+	}
+}
+
+/* A hint: a button glyph followed by what it does. Returns the right edge. */
+static int hint(int x, int cy, const char *button, const char *what, uint32_t ink)
+{
+	x = pad_glyph(x, cy, button) + 7;
+	return text(x, cy + 5, what, ink, 14) + 18;
+}
+
+static int hint_width(const char *button, const char *what)
+{
+	int w = strlen(button) == 1 ? 22 :
+		xenon_overlay_text_width(button, 12, XENON_TEXT_BOLD) + 16;
+	return w + 7 + xenon_overlay_text_width(what, 14, XENON_TEXT_REGULAR) + 18;
 }
 
 static void chevron(int cx, int cy, int dir, uint32_t colour)
 {
-	int tip = cx + 6 * dir;
-	int tail = cx - 6 * dir;
+	int tip = cx + 5 * dir;
+	int tail = cx - 5 * dir;
 
-	xenon_overlay_line(tail, cy - 10, tip, cy, 4, colour);
-	xenon_overlay_line(tip, cy, tail, cy + 10, 4, colour);
+	xenon_overlay_line(tail, cy - 9, tip, cy, 3, colour);
+	xenon_overlay_line(tip, cy, tail, cy + 9, 3, colour);
 }
 
-static void draw_search_icon(int cx, int cy, uint32_t colour)
+static void draw_search_icon(int cx, int cy, int size, uint32_t colour)
 {
-	xenon_overlay_ring(cx - 2, cy - 2, 9, 3, colour);
-	xenon_overlay_line(cx + 5, cy + 5, cx + 13, cy + 13, 4, colour);
+	int r = size * 9 / 16;
+	xenon_overlay_ring(cx - size / 8, cy - size / 8, r, size >= 20 ? 3 : 2, colour);
+	xenon_overlay_line(cx + r / 2 + 1, cy + r / 2 + 1, cx + size / 2 + 2,
+			   cy + size / 2 + 2, size >= 20 ? 4 : 3, colour);
 }
 
-static void draw_button(int cx, int cy, int id)
+static void draw_lock(int x, int cy, uint32_t colour)
 {
-	bool hover = over_circle(cursor_x, cursor_y, cx, cy, 25);
-	uint32_t ink = C_INK;
+	xenon_overlay_ring(x + 6, cy - 4, 5, 2, colour);
+	xenon_overlay_round_rect(x, cy - 3, x + 13, cy + 7, 2, colour);
+}
 
-	xenon_overlay_disc(cx, cy, 21, hover ? C_HOVER : 0xf4f9ed);
-	xenon_overlay_ring(cx, cy, 21, 2, C_CHROME_LINE);
+static void draw_bar_button(int cx, int cy, int id, bool enabled)
+{
+	bool hover = !url_mode && !menu_mode && over_circle(cursor_x, cursor_y, cx, cy, BTN_R + 4);
+	uint32_t ink = enabled ? C_TEXT : C_FAINT;
+
+	if (hover)
+		xenon_overlay_disc(cx, cy, BTN_R, C_HOVER);
 
 	switch (id) {
-	case 0:
-		chevron(cx, cy, -1, ink);
-		badge(cx + 16, cy + 15, "B", C_GREEN, C_WHITE);
+	case BTN_BACK:
+		xenon_overlay_line(cx - 9, cy, cx + 9, cy, 3, ink);
+		chevron(cx - 4, cy, -1, ink);
 		break;
-	case 1:
-		chevron(cx, cy, 1, ink);
+	case BTN_FORWARD:
+		xenon_overlay_line(cx - 9, cy, cx + 9, cy, 3, ink);
+		chevron(cx + 4, cy, 1, ink);
 		break;
-	case 2:
-		xenon_overlay_ring(cx, cy, 11, 3, ink);
-		xenon_overlay_triangle(cx + 5, cy - 15, cx + 14, cy - 13,
-				       cx + 8, cy - 5, ink);
+	case BTN_RELOAD:
+		if (xenon_is_loading()) {
+			/* Stop: an X while loading. */
+			xenon_overlay_line(cx - 7, cy - 7, cx + 7, cy + 7, 3, ink);
+			xenon_overlay_line(cx - 7, cy + 7, cx + 7, cy - 7, 3, ink);
+		} else {
+			xenon_overlay_ring(cx, cy, 9, 3, ink);
+			xenon_overlay_rect(cx + 1, cy - 11, cx + 11, cy, hover ? C_HOVER : C_BAR);
+			xenon_overlay_triangle(cx + 1, cy - 14, cx + 1, cy - 4, cx + 9, cy - 9, ink);
+		}
 		break;
-	case 3:
-		xenon_overlay_triangle(cx - 12, cy - 2, cx, cy - 13,
-				       cx + 12, cy - 2, ink);
-		xenon_overlay_rect(cx - 9, cy - 2, cx + 9, cy + 11, ink);
-		xenon_overlay_rect(cx - 3, cy + 3, cx + 3, cy + 11, 0xf4f9ed);
-		break;
-	case 4:
-		xenon_overlay_line(cx - 11, cy - 8, cx + 11, cy - 8, 3, ink);
-		xenon_overlay_line(cx - 11, cy, cx + 11, cy, 3, ink);
-		xenon_overlay_line(cx - 11, cy + 8, cx + 11, cy + 8, 3, ink);
-		xenon_overlay_disc(cx - 3, cy - 8, 3, ink);
-		xenon_overlay_disc(cx + 5, cy, 3, ink);
-		xenon_overlay_disc(cx - 6, cy + 8, 3, ink);
-		badge(cx + 16, cy + 15, "X", C_GREEN, C_WHITE);
+	case BTN_HOME:
+		xenon_overlay_triangle(cx - 11, cy - 1, cx, cy - 11, cx + 11, cy - 1, ink);
+		xenon_overlay_round_rect(cx - 8, cy - 2, cx + 8, cy + 10, 1, ink);
+		xenon_overlay_rect(cx - 2, cy + 3, cx + 2, cy + 10, hover ? C_HOVER : C_BAR);
 		break;
 	}
 }
@@ -971,349 +1268,333 @@ static void draw_button(int cx, int cy, int id)
 /* Chrome                                                             */
 /* ------------------------------------------------------------------ */
 
-static void draw_top_bar(void)
+static void draw_tabs(void)
 {
 	int active = active_tab();
 	int n = xenon_tab_count();
-	const char *current = active >= 0 ? xenon_tab_url(active) : "";
-	char address[300];
-	size_t shown;
+	int width = tab_width();
+	char clock_text[24];
 
-	xenon_overlay_rect(0, 0, XENON_WIDTH, 92, C_CHROME);
-	xenon_overlay_rect(0, 92, XENON_WIDTH, 94, C_CHROME_DARK);
+	xenon_overlay_rect(0, 0, XENON_WIDTH, STRIP_H, C_STRIP);
 
-	/* NetSurf roundel, in the place of the IE "e". */
-	xenon_overlay_disc(44, 46, 28, C_GREEN);
-	xenon_overlay_ring(44, 46, 28, 3, C_GREEN_DARK);
-	text_centre(44, 30, "N", C_WHITE, 2);
-
-	/* Home button, left of the address field. */
-	xenon_overlay_disc(118, 46, 24, over_circle(cursor_x, cursor_y, 118, 46, 26) ?
-			   C_HOVER : 0xf4f9ed);
-	xenon_overlay_ring(118, 46, 24, 2, C_CHROME_LINE);
-	xenon_overlay_triangle(106, 45, 118, 33, 130, 45, C_INK);
-	xenon_overlay_rect(109, 44, 127, 57, C_INK);
-	xenon_overlay_rect(115, 49, 121, 57, 0xf4f9ed);
-
-	/* Address field. */
-	xenon_overlay_round_rect(ADDR_X0, 20, ADDR_X1, 70, 14, C_WHITE);
-	xenon_overlay_round_frame(ADDR_X0, 20, ADDR_X1, 70, 14, 2, C_CHROME_LINE);
-	badge(176, 45, "A", C_GREEN, C_WHITE);
-
-	if (current[0] == '\0' || strstr(current, "/home.html") != NULL) {
-		text_at(192, 42, "Search or enter address", C_MUTED);
-	} else {
-		shown = strlen(current);
-		if (shown > 76) {
-			snprintf(address, sizeof(address), "%.73s...",
-				 current);
-		} else {
-			snprintf(address, sizeof(address), "%s", current);
-		}
-		text_at(192, 42, address, C_INK);
-	}
-
-	/* Search. */
-	xenon_overlay_disc(SEARCH_CX, ADDR_CY, 19,
-			   over_circle(cursor_x, cursor_y, SEARCH_CX, ADDR_CY, 22) ?
-			   C_GREEN_DARK : C_GREEN);
-	draw_search_icon(SEARCH_CX, ADDR_CY, C_WHITE);
-	badge(SEARCH_CX + 12, ADDR_CY + 14, "Y", C_GREEN_DARK, C_WHITE);
-
-	for (int i = 0; i < 5; i++)
-		draw_button(chrome_btn_x[i], 46, i);
-
-	/* Tab strip. */
-	xenon_overlay_rect(0, 94, XENON_WIDTH, CHROME_TOP, C_CHROME_DARK);
 	for (int i = 0; i < n; i++) {
-		int width = tab_width();
-		int x0;
-		int x1;
-		bool is_active = (i == active);
-		char title[64];
-		int max_chars;
-
-		x0 = 16 + i * (width + 6);
-		x1 = x0 + width;
+		int x0 = tab_x0(i);
+		int x1 = x0 + width;
+		bool is_active = i == active;
+		bool hover = !url_mode && !menu_mode &&
+			     point_in(cursor_x, cursor_y, x0, TAB_Y, x1, STRIP_H);
+		struct gui_window *g = xenon_tab_at(i);
+		int title_x = x0 + 14;
 
 		if (is_active) {
-			xenon_overlay_round_rect(x0, TAB_Y, x1, TAB_Y + TAB_H,
-						 8, C_WHITE);
-			xenon_overlay_round_frame(x0, TAB_Y, x1, TAB_Y + TAB_H,
-						  8, 2, C_GREEN);
-			xenon_overlay_rect(x0 + 2, TAB_Y + 2, x1 - 2, TAB_Y + 8,
-					   C_GREEN);
-		} else {
-			xenon_overlay_round_rect(x0, TAB_Y + 4, x1, TAB_Y + TAB_H,
-						 8, C_TAB_IDLE);
+			xenon_overlay_round_rect(x0, TAB_Y, x1, STRIP_H + 10, 10, C_BAR);
+		} else if (hover) {
+			xenon_overlay_round_rect(x0 + 2, TAB_Y + 3, x1 - 2, STRIP_H - 4, 8,
+						 0x1d2126);
+		} else if (i + 1 != active && i + 1 < n) {
+			xenon_overlay_rect(x1 + TAB_GAP / 2 - 1, TAB_Y + 9, x1 + TAB_GAP / 2,
+					   STRIP_H - 9, 0x2a3037);
 		}
 
-		max_chars = (width - 40) / 8;
-		if (max_chars < 3)
-			max_chars = 3;
-		snprintf(title, sizeof(title), "%.*s", max_chars,
-			 xenon_tab_title(i));
-		text_at(x0 + 12, TAB_Y + (is_active ? 18 : 20), title,
-			is_active ? C_INK : C_MUTED);
+		/* A loading tab shows a spinning dot pair; a loaded one a dot. */
+		if (g != NULL && g->loading) {
+			int phase = (int)(loading_phase % 8);
+			static const int ox[8] = { 0, 4, 6, 4, 0, -4, -6, -4 };
+			static const int oy[8] = { -6, -4, 0, 4, 6, 4, 0, -4 };
+			xenon_overlay_ring(x0 + 22, TAB_Y + 18, 7, 2, C_FAINT);
+			xenon_overlay_disc(x0 + 22 + ox[phase], TAB_Y + 18 + oy[phase], 2, C_ACCENT);
+		} else {
+			xenon_overlay_disc(x0 + 22, TAB_Y + 18, 6,
+					   is_active ? C_ACCENT : C_FAINT);
+		}
+		title_x = x0 + 36;
+
+		xenon_overlay_text_fit(title_x, TAB_Y + 23, xenon_tab_title(i),
+				       is_active ? C_TEXT : C_MUTED, 15, XENON_TEXT_REGULAR,
+				       x1 - title_x - (is_active ? 34 : 12));
 
 		if (is_active) {
-			int cx = x1 - 16;
-			int cy = TAB_Y + 26;
-			xenon_overlay_line(cx - 5, cy - 5, cx + 5, cy + 5, 2,
-					   C_MUTED);
-			xenon_overlay_line(cx - 5, cy + 5, cx + 5, cy - 5, 2,
-					   C_MUTED);
+			int cx = x1 - 18;
+			int cy = TAB_Y + 18;
+			if (over_circle(cursor_x, cursor_y, cx, cy, 12))
+				xenon_overlay_disc(cx, cy, 11, C_HOVER);
+			xenon_overlay_line(cx - 4, cy - 4, cx + 4, cy + 4, 2, C_MUTED);
+			xenon_overlay_line(cx - 4, cy + 4, cx + 4, cy - 4, 2, C_MUTED);
 		}
 	}
 
 	/* New tab. */
 	{
 		int px = plus_center_x();
-		int py = TAB_Y + 22;
-		uint32_t fill = over_circle(cursor_x, cursor_y, px, py, 20) ?
-				C_GREEN_DARK : C_GREEN;
-		xenon_overlay_disc(px, py, 18, fill);
-		xenon_overlay_rect(px - 8, py - 2, px + 8, py + 2, C_WHITE);
-		xenon_overlay_rect(px - 2, py - 8, px + 2, py + 8, C_WHITE);
+		int py = STRIP_H / 2 + 3;
+		if (over_circle(cursor_x, cursor_y, px, py, 18))
+			xenon_overlay_disc(px, py, 15, C_HOVER);
+		xenon_overlay_line(px - 7, py, px + 7, py, 2, C_TEXT);
+		xenon_overlay_line(px, py - 7, px, py + 7, 2, C_TEXT);
+	}
+
+	xenon_clock_text(clock_text, sizeof(clock_text));
+	text_right(XENON_WIDTH - 18, 28, clock_text, C_MUTED, 15);
+}
+
+static void draw_toolbar(void)
+{
+	int active = active_tab();
+	const char *current = active >= 0 ? xenon_tab_url(active) : "";
+	bool home = current[0] == '\0' || strstr(current, "/home.html") != NULL;
+	bool hover = !url_mode && !menu_mode &&
+		     point_in(cursor_x, cursor_y, ADDR_X0, ADDR_Y0, ADDR_X1, ADDR_Y1);
+	int text_x = ADDR_X0 + 22;
+
+	xenon_overlay_rect(0, STRIP_H, XENON_WIDTH, CHROME_TOP, C_BAR);
+
+	draw_bar_button(bar_btn_x[BTN_BACK], BAR_CY, BTN_BACK,
+			xenon_bw != NULL && browser_window_back_available(xenon_bw));
+	draw_bar_button(bar_btn_x[BTN_FORWARD], BAR_CY, BTN_FORWARD,
+			xenon_bw != NULL && browser_window_forward_available(xenon_bw));
+	draw_bar_button(bar_btn_x[BTN_RELOAD], BAR_CY, BTN_RELOAD, xenon_bw != NULL);
+	draw_bar_button(bar_btn_x[BTN_HOME], BAR_CY, BTN_HOME, true);
+
+	/* Address pill. */
+	xenon_overlay_round_rect(ADDR_X0, ADDR_Y0, ADDR_X1, ADDR_Y1, 21,
+				 hover ? C_FIELD_HOVER : C_FIELD);
+	if (home) {
+		draw_search_icon(text_x + 7, BAR_CY, 16, C_MUTED);
+		text(text_x + 26, BAR_CY + 6, "Search the web or type an address",
+		     C_MUTED, 17);
+	} else {
+		bool secure = strncmp(current, "https://", 8) == 0;
+		const char *rest = current;
+		char host[256];
+		size_t hl;
+
+		if (secure) {
+			draw_lock(text_x, BAR_CY, C_MUTED);
+			rest += 8;
+		} else if (strncmp(current, "http://", 7) == 0) {
+			rest += 7;
+		}
+		text_x += secure ? 24 : 0;
+
+		/* The host bright, the path dimmed, as desktop browsers do. */
+		hl = strcspn(rest, "/?#");
+		if (hl >= sizeof(host))
+			hl = sizeof(host) - 1;
+		memcpy(host, rest, hl);
+		host[hl] = '\0';
+		{
+			int end = text(text_x, BAR_CY + 6, host, C_TEXT, 17);
+			if (rest[hl] != '\0')
+				xenon_overlay_text_fit(end, BAR_CY + 6, rest + hl, C_MUTED, 17,
+						       XENON_TEXT_REGULAR, ADDR_X1 - 60 - end);
+		}
+	}
+	if (hover) {
+		pad_glyph(ADDR_X1 - 34, BAR_CY, "A");
+	}
+
+	/* Search and menu. */
+	if (!url_mode && !menu_mode && over_circle(cursor_x, cursor_y, MENU_CX, BAR_CY, BTN_R + 4))
+		xenon_overlay_disc(MENU_CX, BAR_CY, BTN_R, C_HOVER);
+	draw_search_icon(MENU_CX, BAR_CY, 18, C_TEXT);
+	if (!url_mode && !menu_mode && over_circle(cursor_x, cursor_y, MENU2_CX, BAR_CY, BTN_R + 4))
+		xenon_overlay_disc(MENU2_CX, BAR_CY, BTN_R, C_HOVER);
+	for (int i = -1; i <= 1; i++)
+		xenon_overlay_disc(MENU2_CX, BAR_CY + i * 7, 2, C_TEXT);
+
+	/* Progress: a sweep along the toolbar's foot while loading. */
+	xenon_overlay_rect(0, CHROME_TOP - 1, XENON_WIDTH, CHROME_TOP, C_BAR_LINE);
+	if (xenon_is_loading()) {
+		int w = 260;
+		int x = (int)((loading_phase * 34) % (XENON_WIDTH + w)) - w;
+		xenon_overlay_rect(x < 0 ? 0 : x, CHROME_TOP - 3, x + w, CHROME_TOP,
+				   C_ACCENT);
 	}
 }
 
-static void draw_bottom_bar(void)
+static void draw_status_bar(void)
 {
-	char clock_text[24];
+	static const struct {
+		const char *button;
+		const char *what;
+	} hints[] = {
+		{ "A", "Open" }, { "B", "Back" }, { "X", "Menu" },
+		{ "Y", "Search" }, { "RS", "Scroll" },
+	};
+	int total = 0;
+	int x;
 
-	xenon_overlay_rect(0, BOTTOM_Y, XENON_WIDTH, XENON_HEIGHT, C_CHROME);
-	xenon_overlay_rect(0, BOTTOM_Y, XENON_WIDTH, BOTTOM_Y + 2,
-			   C_CHROME_DARK);
+	xenon_overlay_rect(0, BOTTOM_Y, XENON_WIDTH, XENON_HEIGHT, C_STRIP);
 
-	xenon_overlay_disc(34, 698, 19, C_GREEN_DARK);
-	text_centre(34, 690, "P1", C_WHITE, 1);
-	text_at(62, 684, "PLAYER ONE", C_INK);
-	text_at(62, 702, "NetSurf 360  /  online", C_MUTED);
+	for (size_t i = 0; i < sizeof(hints) / sizeof(hints[0]); i++)
+		total += hint_width(hints[i].button, hints[i].what);
+	x = XENON_WIDTH - 10 - total;
+	for (size_t i = 0; i < sizeof(hints) / sizeof(hints[0]); i++)
+		x = hint(x, BOTTOM_Y + CHROME_BOTTOM / 2, hints[i].button, hints[i].what,
+			 C_MUTED);
 
-	xenon_overlay_disc(1104, 698, 17,
-			   over_circle(cursor_x, cursor_y, 1104, 698, 20) ?
-			   C_GREEN_DARK : C_GREEN);
-	text_centre(1104, 690, "?", C_WHITE, 1);
-
-	xenon_clock_text(clock_text, sizeof(clock_text));
-	text_right(1218, 684, clock_text, C_INK);
-	text_right(1218, 702, "UTC", C_MUTED);
-
-	/* Mains-powered console: a full battery is the honest decoration. */
-	xenon_overlay_round_frame(1232, 692, 1268, 708, 3, 2, C_INK);
-	xenon_overlay_rect(1268, 696, 1273, 704, C_INK);
-	xenon_overlay_rect(1236, 696, 1264, 704, C_GREEN);
+	if (status_text[0] != '\0')
+		xenon_overlay_text_fit(16, BOTTOM_Y + 20, status_text, C_MUTED, 14,
+				       XENON_TEXT_REGULAR, XENON_WIDTH - total - 60);
 }
 
 /* ------------------------------------------------------------------ */
 /* Speed dial                                                         */
 /* ------------------------------------------------------------------ */
 
-static void draw_icon(dial_icon icon, int cx, int cy)
+static void draw_icon(dial_icon icon, int cx, int cy, uint32_t colour)
 {
+	const uint32_t w = C_WHITE;
+
+	xenon_overlay_disc(cx, cy, 30, colour);
+
 	switch (icon) {
 	case ICON_GLOBE:
-		xenon_overlay_disc(cx, cy, 32, 0x4a7fb5);
-		xenon_overlay_ring(cx, cy, 31, 2, C_WHITE);
-		xenon_overlay_ring(cx, cy, 21, 2, C_WHITE);
-		xenon_overlay_line(cx - 31, cy, cx + 31, cy, 2, C_WHITE);
-		xenon_overlay_line(cx, cy - 31, cx, cy + 31, 2, C_WHITE);
+		xenon_overlay_ring(cx, cy, 17, 2, w);
+		xenon_overlay_ring(cx, cy, 9, 2, w);
+		xenon_overlay_line(cx - 17, cy, cx + 17, cy, 2, w);
+		xenon_overlay_line(cx, cy - 17, cx, cy + 17, 2, w);
 		break;
 	case ICON_SEARCH:
-		xenon_overlay_disc(cx, cy, 32, C_GREEN);
-		draw_search_icon(cx, cy, C_WHITE);
+		draw_search_icon(cx, cy, 26, w);
 		break;
 	case ICON_TROPHY:
-		xenon_overlay_disc(cx, cy, 32, 0xf0b429);
-		xenon_overlay_round_rect(cx - 15, cy - 20, cx + 15, cy + 1, 6,
-					 C_WHITE);
-		xenon_overlay_ring(cx - 18, cy - 9, 8, 3, C_WHITE);
-		xenon_overlay_ring(cx + 18, cy - 9, 8, 3, C_WHITE);
-		xenon_overlay_rect(cx - 3, cy + 1, cx + 3, cy + 12, C_WHITE);
-		xenon_overlay_round_rect(cx - 13, cy + 12, cx + 13, cy + 20, 3,
-					 C_WHITE);
+		xenon_overlay_round_rect(cx - 11, cy - 15, cx + 11, cy + 1, 5, w);
+		xenon_overlay_ring(cx - 13, cy - 7, 6, 2, w);
+		xenon_overlay_ring(cx + 13, cy - 7, 6, 2, w);
+		xenon_overlay_rect(cx - 2, cy + 1, cx + 2, cy + 9, w);
+		xenon_overlay_round_rect(cx - 10, cy + 9, cx + 10, cy + 15, 2, w);
 		break;
 	case ICON_PEOPLE:
-		xenon_overlay_disc(cx, cy, 32, 0x5a9e6f);
-		xenon_overlay_disc(cx - 9, cy - 10, 9, C_WHITE);
-		xenon_overlay_disc(cx + 12, cy - 7, 7, C_WHITE);
-		xenon_overlay_round_rect(cx - 23, cy + 0, cx + 4, cy + 22, 9,
-					 C_WHITE);
-		xenon_overlay_round_rect(cx + 4, cy + 5, cx + 22, cy + 22, 7,
-					 C_WHITE);
+		xenon_overlay_disc(cx - 6, cy - 7, 6, w);
+		xenon_overlay_disc(cx + 9, cy - 5, 5, w);
+		xenon_overlay_round_rect(cx - 16, cy + 1, cx + 3, cy + 15, 7, w);
+		xenon_overlay_round_rect(cx + 4, cy + 4, cx + 16, cy + 15, 5, w);
 		break;
 	case ICON_PICTURE:
-		xenon_overlay_disc(cx, cy, 32, 0x4aa3a2);
-		xenon_overlay_round_rect(cx - 25, cy - 19, cx + 25, cy + 19, 4,
-					 C_WHITE);
-		xenon_overlay_triangle(cx - 19, cy + 13, cx - 3, cy - 7,
-				       cx + 9, cy + 13, 0x4aa3a2);
-		xenon_overlay_triangle(cx + 1, cy + 13, cx + 12, cy + 0,
-				       cx + 22, cy + 13, 0x4aa3a2);
-		xenon_overlay_disc(cx + 14, cy - 9, 4, 0xf0b429);
+		xenon_overlay_round_rect(cx - 17, cy - 13, cx + 17, cy + 13, 3, w);
+		xenon_overlay_triangle(cx - 13, cy + 9, cx - 3, cy - 5, cx + 6, cy + 9, colour);
+		xenon_overlay_triangle(cx + 1, cy + 9, cx + 8, cy, cx + 14, cy + 9, colour);
+		xenon_overlay_disc(cx + 9, cy - 6, 3, 0xf3c13a);
 		break;
 	case ICON_HELP:
-		xenon_overlay_disc(cx, cy, 32, C_GREEN);
-		text_centre(cx, cy - 16, "?", C_WHITE, 2);
+		text_centre(cx, cy + 10, "?", w, 30, XENON_TEXT_BOLD);
 		break;
 	case ICON_PLAY:
-		xenon_overlay_round_rect(cx - 30, cy - 21, cx + 30, cy + 21, 10,
-					 0xe53935);
-		xenon_overlay_triangle(cx - 8, cy - 13, cx - 8, cy + 13,
-				       cx + 15, cy, C_WHITE);
+		xenon_overlay_triangle(cx - 7, cy - 11, cx - 7, cy + 11, cx + 12, cy, w);
 		break;
 	case ICON_ORB:
-		xenon_overlay_disc(cx, cy, 32, 0x8bc34a);
-		xenon_overlay_ring(cx, cy, 31, 2, 0xe6f2d5);
-		text_centre(cx, cy - 16, "X", C_WHITE, 2);
+		xenon_overlay_ring(cx, cy, 17, 3, w);
+		xenon_overlay_line(cx - 8, cy - 8, cx + 8, cy + 8, 4, w);
+		xenon_overlay_line(cx - 8, cy + 8, cx + 8, cy - 8, 4, w);
 		break;
 	case ICON_N:
-		xenon_overlay_disc(cx, cy, 32, 0xe07b39);
-		text_centre(cx, cy - 16, "N", C_WHITE, 2);
+		text_centre(cx, cy + 10, "N", w, 30, XENON_TEXT_BOLD);
 		break;
 	case ICON_CODE:
-		xenon_overlay_disc(cx, cy, 32, 0xe44d26);
-		text_centre(cx, cy - 16, "<>", C_WHITE, 2);
+		text_centre(cx, cy + 8, "</>", w, 22, XENON_TEXT_BOLD);
 		break;
 	case ICON_E:
-		xenon_overlay_disc(cx, cy, 32, 0x8a9a7b);
-		text_centre(cx, cy - 16, "e", C_WHITE, 2);
+		text_centre(cx, cy + 9, "e", w, 32, XENON_TEXT_BOLD);
 		break;
 	case ICON_INFO:
-		xenon_overlay_disc(cx, cy, 32, 0x4a7fb5);
-		text_centre(cx, cy - 16, "i", C_WHITE, 2);
+		text_centre(cx, cy + 10, "i", w, 30, XENON_TEXT_BOLD);
 		break;
 	}
 }
 
-static void control_badge(int x, int y, const char *label)
+static void draw_home(void)
 {
-	int len = (int)strlen(label);
+	char clock_text[24];
+	bool search_hover = !menu_mode &&
+			    point_in(cursor_x, cursor_y, SEARCH_X0, SEARCH_Y0, SEARCH_X1, SEARCH_Y1);
 
-	if (strcmp(label, "STICK") == 0) {
-		xenon_overlay_disc(x, y, 15, C_WHITE);
-		xenon_overlay_ring(x, y, 15, 2, C_GREEN);
-		xenon_overlay_disc(x, y, 7, C_GREEN);
-	} else if (len > 2) {
-		int half = len * 4 + 9;
-		xenon_overlay_round_rect(x - half, y - 13, x + half, y + 13, 7,
-					 C_GREEN);
-		text_centre(x, y - 8, label, C_WHITE, 1);
-	} else {
-		xenon_overlay_disc(x, y, 15, C_GREEN);
-		text_centre(x, y - 8, label, C_WHITE, 1);
-	}
-}
+	xenon_overlay_gradient(0, CHROME_TOP, XENON_WIDTH, BOTTOM_Y, C_HOME_TOP, C_HOME_BOTTOM);
 
-static void draw_start(void)
-{
-	static const struct {
-		const char *badge;
-		const char *text;
-	} controls[] = {
-		{ "A", "Select / open" },
-		{ "B", "Back" },
-		{ "X", "Options" },
-		{ "Y", "Search / address" },
-		{ "LB/RB", "Scroll page" },
-		{ "STICK", "Move pointer" },
-		{ "BACK", "Home" },
-		{ "START", "Quit" },
-	};
+	/* The time, large, as the dashboard does. */
+	xenon_clock_text(clock_text, sizeof(clock_text));
+	text_centre(XENON_WIDTH / 2, 200, clock_text, C_TEXT, 58, XENON_TEXT_REGULAR);
+	text_centre(XENON_WIDTH / 2, 232, "NetSurf 360", C_MUTED, 17, XENON_TEXT_REGULAR);
 
-	xenon_overlay_rect(0, CHROME_TOP, XENON_WIDTH, BOTTOM_Y, C_PAGE);
+	/* Search pill. */
+	xenon_overlay_shadow(SEARCH_X0, SEARCH_Y0, SEARCH_X1, SEARCH_Y1, 26, 6, 70);
+	xenon_overlay_round_rect(SEARCH_X0, SEARCH_Y0, SEARCH_X1, SEARCH_Y1, 26,
+				 search_hover ? C_FIELD_HOVER : C_FIELD);
+	if (search_hover)
+		xenon_overlay_round_frame(SEARCH_X0, SEARCH_Y0, SEARCH_X1, SEARCH_Y1, 26, 2,
+					  C_ACCENT);
+	draw_search_icon(SEARCH_X0 + 32, (SEARCH_Y0 + SEARCH_Y1) / 2, 18, C_MUTED);
+	text(SEARCH_X0 + 58, (SEARCH_Y0 + SEARCH_Y1) / 2 + 7,
+	     "Search the web or type an address", C_MUTED, 19);
+	pad_glyph(SEARCH_X1 - 42, (SEARCH_Y0 + SEARCH_Y1) / 2, "Y");
 
-	xenon_overlay_text_scaled(54, 154, "Speed Dial", C_INK, 2);
-	text_at(54, 190, "A light browser for Xbox 360 - pick a page or press Y to search",
-		C_MUTED);
-	text_right(1226, 158, dial_page == 0 ? "Page 1 of 2" : "Page 2 of 2",
-		   C_MUTED);
-
-	for (int i = 0; i < DIAL_PER_PAGE; i++) {
-		int index = dial_page * DIAL_PER_PAGE + i;
+	for (int i = 0; i < DIAL_COUNT; i++) {
 		int x0, y0, x1, y1;
 		int cx;
 		bool hover;
 
-		dial_rect(index, &x0, &y0, &x1, &y1);
-		hover = point_in(cursor_x, cursor_y, x0, y0, x1, y1);
+		dial_rect(i, &x0, &y0, &x1, &y1);
+		hover = !menu_mode && point_in(cursor_x, cursor_y, x0, y0, x1, y1);
 		cx = (x0 + x1) / 2;
 
-		xenon_overlay_round_rect(x0, y0, x1, y1, 12, C_WHITE);
-		xenon_overlay_round_frame(x0, y0, x1, y1, 12,
-					  hover ? 3 : 2,
-					  hover ? C_GREEN : C_CARD_LINE);
-
-		draw_icon(dials[index].icon, cx, y0 + 76);
-
-		text_centre(cx, y0 + 150, dials[index].label, C_INK, 1);
+		if (hover) {
+			y0 -= 4;
+			y1 -= 4;
+			xenon_overlay_shadow(x0, y0, x1, y1, 16, 10, 120);
+		}
+		xenon_overlay_round_rect(x0, y0, x1, y1, 16, hover ? C_CARD_HOVER : C_CARD);
 		if (hover)
-			text_centre(cx, y0 + 176, "A  open", C_GREEN_DARK, 1);
+			xenon_overlay_round_frame(x0, y0, x1, y1, 16, 3, C_ACCENT);
+
+		draw_icon(dials[i].icon, cx, y0 + 56, dials[i].colour);
+		xenon_overlay_text_fit(cx - xenon_overlay_text_width(dials[i].label, 16,
+								    XENON_TEXT_REGULAR) / 2,
+				       y0 + 116, dials[i].label, hover ? C_TEXT : 0xc9d0d8,
+				       16, XENON_TEXT_REGULAR, DIAL_W - 16);
 	}
 
-	/* Paging arrows. */
-	{
-		uint32_t left = dial_page > 0 ? C_GREEN : 0xd9e5c8;
-		uint32_t right = dial_page < 1 ? C_GREEN : 0xd9e5c8;
-		uint32_t left_ink = dial_page > 0 ? C_WHITE : 0xa8b89a;
-		uint32_t right_ink = dial_page < 1 ? C_WHITE : 0xa8b89a;
-
-		xenon_overlay_disc(30, 319, 20, left);
-		chevron(30, 319, -1, left_ink);
-		xenon_overlay_disc(1250, 319, 20, right);
-		chevron(1250, 319, 1, right_ink);
-
-		xenon_overlay_disc(628, 442, 5, dial_page == 0 ? C_GREEN : 0xc5d6b0);
-		xenon_overlay_disc(652, 442, 5, dial_page == 1 ? C_GREEN : 0xc5d6b0);
-	}
-
-	/* Browser Controls card. */
-	xenon_overlay_round_rect(54, 456, 1226, 662, 12, 0xe8f2da);
-	xenon_overlay_round_frame(54, 456, 1226, 662, 12, 2, C_CARD_LINE);
-	text_bold(76, 468, "Browser Controls", C_INK);
-
-	for (int i = 0; i < 8; i++) {
-		int col = i % 4;
-		int row = i / 4;
-		int bx = 104 + col * 285;
-		int by = 514 + row * 72;
-		control_badge(bx, by, controls[i].badge);
-		text_at(bx + 34, by - 8, controls[i].text, C_INK);
-	}
-
-	text_at(76, 630, "Tip: Y searches the web with DuckDuckGo Lite, X opens options.",
-		C_MUTED);
+	text_centre(XENON_WIDTH / 2, 668,
+		    "Move with the left stick, press A to open. BACK returns here.",
+		    C_FAINT, 14, XENON_TEXT_REGULAR);
 }
 
 /* ------------------------------------------------------------------ */
-/* Options menu                                                       */
+/* Options drawer                                                     */
 /* ------------------------------------------------------------------ */
 
 static void draw_menu(void)
 {
-	int x0 = 872;
-	int y0 = 156;
-	int x1 = 1254;
-	int y1 = 620;
+	int x0 = DRAWER_X0;
+	int y0 = CHROME_TOP;
+	int y1 = BOTTOM_Y;
 
-	xenon_overlay_round_rect(x0, y0, x1, y1, 12, C_WHITE);
-	xenon_overlay_round_frame(x0, y0, x1, y1, 12, 3, C_GREEN);
-	xenon_overlay_round_rect(x0 + 3, y0 + 3, x1 - 3, y0 + 46, 10, C_GREEN);
-	text_bold(x0 + 18, y0 + 15, "Options", C_WHITE);
+	xenon_overlay_rect_a(0, y0, x0, y1, 0x000000, 120);
+	xenon_overlay_rect_a(x0 - 10, y0, x0, y1, 0x000000, 60);
+	xenon_overlay_rect(x0, y0, XENON_WIDTH, y1, C_BAR);
+	xenon_overlay_rect(x0, y0, x0 + 1, y1, C_BAR_LINE);
+
+	text_b(x0 + 28, y0 + 46, "Menu", C_TEXT, 24);
 
 	for (int i = 0; i < MENU_ITEMS; i++) {
-		int y = y0 + 58 + i * 38;
-		bool selected = (i == menu_sel);
+		int y = y0 + 72 + i * MENU_ROW_H;
+		bool selected = i == menu_sel;
+
 		if (selected) {
-			xenon_overlay_round_rect(x0 + 12, y - 6, x1 - 12, y + 30,
-						 8, C_GREEN);
-			text_at(x0 + 30, y, menu_items[i], C_WHITE);
-		} else {
-			text_at(x0 + 30, y, menu_items[i], C_INK);
+			xenon_overlay_round_rect(x0 + 14, y, XENON_WIDTH - 14, y + MENU_ROW_H - 6,
+						 10, C_ACCENT_DARK);
+			xenon_overlay_rect(x0 + 14, y + 8, x0 + 18, y + MENU_ROW_H - 14,
+					   C_ACCENT);
 		}
+		text(x0 + 32, y + 26, menu_items[i], selected ? C_WHITE : C_TEXT, 18);
+		if (i == 4 || i == 8)
+			xenon_overlay_rect(x0 + 28, y - 3, XENON_WIDTH - 28, y - 2, C_BAR_LINE);
 	}
-	text_at(x0 + 18, y1 - 26, "A select   B close", C_MUTED);
+
+	{
+		int x = x0 + 28;
+		x = hint(x, y1 - 26, "A", "Select", C_MUTED);
+		hint(x, y1 - 26, "B", "Close", C_MUTED);
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -1321,109 +1602,161 @@ static void draw_menu(void)
 /* ------------------------------------------------------------------ */
 
 static void draw_key(int x, int y, int w, int h, const char *label,
-		     bool selected)
+		     bool selected, bool special)
 {
-	xenon_overlay_round_rect(x, y, x + w, y + h, 6,
-				 selected ? C_GREEN : C_WHITE);
-	xenon_overlay_round_frame(x, y, x + w, y + h, 6, 2,
-				  selected ? C_GREEN_DARK : C_CARD_LINE);
-	text_centre(x + w / 2, y + (h - 16) / 2, label,
-		    selected ? C_WHITE : C_INK, 1);
+	uint32_t fill = selected ? C_ACCENT : (special ? 0x323841 : C_FIELD);
+
+	if (selected)
+		xenon_overlay_shadow(x, y, x + w, y + h, 10, 6, 90);
+	xenon_overlay_round_rect(x, y, x + w, y + h, 10, fill);
+	text_centre(x + w / 2, y + h / 2 + 7, label,
+		    selected ? 0x10220a : C_TEXT, special ? 17 : 21,
+		    selected ? XENON_TEXT_BOLD : XENON_TEXT_REGULAR);
 }
 
 static void draw_url_panel(void)
 {
-	int panel_x0 = 90;
-	int panel_x1 = 1190;
-	int panel_y0 = 196;
-	int panel_y1 = 664;
-	char line[180];
-	const char *shown;
-	size_t skip;
+	int panel_x0 = OSK_X - 40;
+	int panel_x1 = XENON_WIDTH - OSK_X + 40;
+	int panel_y0 = 140;
+	int panel_y1 = 680;
+	int field_y0 = 206;
+	int field_y1 = 258;
+	int tx;
 
-	xenon_overlay_rect(0, CHROME_TOP, XENON_WIDTH, BOTTOM_Y, 0x2a3a22);
-	xenon_overlay_round_rect(panel_x0, panel_y0, panel_x1, panel_y1, 16,
-				 0xeef5e4);
-	xenon_overlay_round_frame(panel_x0, panel_y0, panel_x1, panel_y1, 16,
-				  3, C_GREEN);
+	xenon_overlay_rect_a(0, 0, XENON_WIDTH, XENON_HEIGHT, 0x000000, 150);
+	xenon_overlay_shadow(panel_x0, panel_y0, panel_x1, panel_y1, 22, 14, 150);
+	xenon_overlay_round_rect(panel_x0, panel_y0, panel_x1, panel_y1, 22, C_BAR);
 
-	text_bold(panel_x0 + 24, panel_y0 + 18,
-		  search_mode ? "Search the web" : "Address", C_INK);
-	text_right(panel_x1 - 24, panel_y0 + 18,
-		   search_mode ? "DuckDuckGo Lite" : "Type a URL", C_MUTED);
+	text_b(panel_x0 + 40, panel_y0 + 44,
+	       field_mode ? (field_password ? "Password" : "Type into the page") :
+	       search_mode ? "Search the web" : "Go to address", C_TEXT, 22);
+	text_right(panel_x1 - 40, panel_y0 + 42,
+		   search_mode ? "DuckDuckGo Lite" : "", C_MUTED, 15);
 
-	xenon_overlay_round_rect(114, 228, 1166, 270, 10, C_WHITE);
-	xenon_overlay_round_frame(114, 228, 1166, 270, 10, 2, C_CARD_LINE);
+	xenon_overlay_round_rect(OSK_X, field_y0, XENON_WIDTH - OSK_X, field_y1, 26,
+				 C_FIELD);
+	xenon_overlay_round_frame(OSK_X, field_y0, XENON_WIDTH - OSK_X, field_y1, 26, 2,
+				  C_ACCENT);
+	draw_search_icon(OSK_X + 30, (field_y0 + field_y1) / 2, 18, C_MUTED);
 
-	skip = 0;
-	if (url_len > 120)
-		skip = url_len - 120;
-	shown = url_text + skip;
-	snprintf(line, sizeof(line), "%s%s_", skip > 0 ? "..." : "", shown);
-	text_at(130, 241, url_len == 0 ? "Search or enter address" :
-		line, url_len == 0 ? C_MUTED : C_INK);
-	if (url_len == 0)
-		text_at(130 + (int)strlen("Search or enter address") * 8, 241,
-			"_", C_INK);
+	tx = OSK_X + 56;
+	if (url_len == 0) {
+		text(tx, field_y1 - 19, "Type with the keyboard below", C_FAINT, 20);
+		xenon_overlay_rect(tx - 2, field_y0 + 13, tx, field_y1 - 13, C_ACCENT);
+	} else {
+		/* Show the end of long text so the caret stays visible; a
+		 * password as dots. */
+		static char dots[URL_MAX * 3 + 1];
+		const char *shown = url_text;
+		if (field_password) {
+			size_t n = 0;
+			for (size_t i = 0; i < url_len && n + 3 < sizeof(dots); i++) {
+				memcpy(dots + n, "\xe2\x80\xa2", 3);
+				n += 3;
+			}
+			dots[n] = '\0';
+			shown = dots;
+		}
+		int avail = XENON_WIDTH - OSK_X - 30 - tx;
+		while (*shown != '\0' &&
+		       xenon_overlay_text_width(shown, 20, XENON_TEXT_REGULAR) > avail)
+			shown++;
+		int end = text(tx, field_y1 - 19, shown, C_TEXT, 20);
+		xenon_overlay_rect(end + 1, field_y0 + 13, end + 3, field_y1 - 13, C_ACCENT);
+	}
 
 	for (int i = 0; i < OSK_KEYS; i++) {
 		int col = i % OSK_COLS;
 		int row = i / OSK_COLS;
-		int x = OSK_X + col * (OSK_KEY_W + 4);
-		int y = OSK_Y + row * (OSK_KEY_H + 4);
+		int x = OSK_X + col * (OSK_KEY_W + OSK_KEY_GAP);
+		int y = OSK_Y + row * (OSK_KEY_H + OSK_KEY_GAP);
 		char label[2] = { osk_chars[i], '\0' };
 
 		if (caps && label[0] >= 'a' && label[0] <= 'z')
 			label[0] = (char)(label[0] - 'a' + 'A');
-		draw_key(x, y, OSK_KEY_W, OSK_KEY_H, label, i == key_sel);
+		draw_key(x, y, OSK_KEY_W, OSK_KEY_H, label, i == key_sel, false);
 	}
 
-	for (int i = 0; i < OSK_ACTIONS; i++) {
-		int x = 114 + i * (OSK_ACTION_W + 4);
-		int y = 524;
-		const char *label = osk_action_names[i];
-		if (i == 4 && !looks_like_url(url_text))
-			label = "Search";
-		draw_key(x, y, OSK_ACTION_W, 48, label,
-			 key_sel == OSK_KEYS + i);
+	{
+		int total = OSK_COLS * OSK_KEY_W + (OSK_COLS - 1) * OSK_KEY_GAP;
+		int w = (total - (OSK_ACTIONS - 1) * OSK_KEY_GAP) / OSK_ACTIONS;
+		for (int i = 0; i < OSK_ACTIONS; i++) {
+			int x = OSK_X + i * (w + OSK_KEY_GAP);
+			const char *label = osk_action_names[i];
+			if (i == 0 && caps)
+				label = "SHIFT";
+			if (i == 4 && field_mode)
+				label = "Done";
+			else if (i == 4 && !looks_like_url(url_text))
+				label = "Search";
+			draw_key(x, OSK_ACTION_Y, w, OSK_ACTION_H, label,
+				 key_sel == OSK_KEYS + i, true);
+		}
 	}
 
-	text_at(114, 596, "A type   B cancel   X delete   Y go", C_MUTED);
+	{
+		int x = OSK_X;
+		int cy = panel_y1 - 24;
+		x = hint(x, cy, "A", "Type", C_MUTED);
+		x = hint(x, cy, "X", "Delete", C_MUTED);
+		x = hint(x, cy, "Y", field_mode ? "Done" : "Go", C_MUTED);
+		x = hint(x, cy, "B", "Cancel", C_MUTED);
+		x = hint(x, cy, "LB", "Shift", C_MUTED);
+		hint(x, cy, "RB", "Space", C_MUTED);
+	}
+}
+
+/* A thin thumb at the right edge of the page shows where the view is. */
+static void draw_scroll_bar(void)
+{
+	int y, view, total;
+	int track = BOTTOM_Y - CHROME_TOP - 8;
+	int thumb, top;
+
+	if (!xenon_scroll_info(&y, &view, &total))
+		return;
+	thumb = track * view / total;
+	if (thumb < 32)
+		thumb = 32;
+	top = CHROME_TOP + 4 + (int)((int64_t)(track - thumb) * y / (total - view));
+	xenon_overlay_round_rect_a(XENON_WIDTH - 9, top, XENON_WIDTH - 3, top + thumb, 3,
+				   0x202428, 150);
 }
 
 static void draw_toast(void)
 {
 	int width;
 	int x0;
+	int y0 = BOTTOM_Y - 62;
 
 	if (toast[0] == '\0')
 		return;
-	width = (int)strlen(toast) * 8 + 28;
-	if (width > 640)
-		width = 640;
-	x0 = XENON_WIDTH - width - 16;
-	xenon_overlay_round_rect(x0, BOTTOM_Y - 42, x0 + width, BOTTOM_Y - 8,
-				 8, 0x2e3d24);
-	xenon_overlay_round_frame(x0, BOTTOM_Y - 42, x0 + width, BOTTOM_Y - 8,
-				  8, 2, C_GREEN);
-	text_at(x0 + 14, BOTTOM_Y - 32, toast, C_WHITE);
+	width = xenon_overlay_text_width(toast, 16, XENON_TEXT_REGULAR) + 44;
+	if (width > 900)
+		width = 900;
+	x0 = (XENON_WIDTH - width) / 2;
+	xenon_overlay_shadow(x0, y0, x0 + width, y0 + 42, 21, 8, 110);
+	xenon_overlay_round_rect(x0, y0, x0 + width, y0 + 42, 21, 0x30363e);
+	xenon_overlay_text_fit(x0 + 22, y0 + 27, toast, C_TEXT, 16, XENON_TEXT_REGULAR,
+			       width - 44);
 }
 
 void xenon_ui_draw(void)
 {
 	if (on_home() && !url_mode)
-		draw_start();
+		draw_home();
 
-	draw_top_bar();
-	draw_bottom_bar();
+	draw_toolbar();
+	draw_tabs();
+	draw_status_bar();
 
+	if (!on_home())
+		draw_scroll_bar();
 	if (menu_mode)
 		draw_menu();
 	if (url_mode)
 		draw_url_panel();
 
 	draw_toast();
-
-	if (!cursor_hidden)
-		xenon_overlay_arrow(cursor_x, cursor_y);
 }

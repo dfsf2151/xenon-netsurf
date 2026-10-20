@@ -1,5 +1,6 @@
 # Build configuration for the Xenon (Xbox 360) NetSurf target.
 # Copy to netsurf-src/Makefile.config and adjust the paths below.
+# Duktape JavaScript (ES5) is on; its bindings need nsgenbind on the PATH.
 
 override NETSURF_USE_CURL := NO
 override NETSURF_USE_OPENSSL := NO
@@ -10,7 +11,7 @@ override NETSURF_USE_BMP := YES
 override NETSURF_USE_WEBP := NO
 override NETSURF_USE_JPEGXL := NO
 override NETSURF_USE_NSPSL := NO
-override NETSURF_USE_DUKTAPE := NO
+override NETSURF_USE_DUKTAPE := YES
 override NETSURF_USE_HARU_PDF := NO
 override NETSURF_USE_VIDEO := NO
 override NETSURF_USE_RSVG := NO

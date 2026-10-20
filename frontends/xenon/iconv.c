@@ -1,13 +1,16 @@
 /*
  * Minimal iconv for the Xbox 360 (newlib has the header but no
  * implementation). Only the encodings a browser actually meets on the
- * wire are supported: UTF-8, ASCII, ISO-8859-1, Windows-1252 and UTF-16.
+ * wire are supported: UTF-8, ASCII, ISO-8859-1, Windows-1252 and UTF-16,
+ * in either direction (pages are decoded to UTF-8; form data is encoded
+ * from it). "//TRANSLIT" turns characters the target lacks into '?'.
  *
  * This file is part of NetSurf, http://www.netsurf-browser.org/
  * Licensed under the GNU General Public License, version 2.
  */
 
 #include <errno.h>
+#include <stdbool.h>
 #include <iconv.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -30,6 +33,7 @@ enum xenon_encoding {
 struct xenon_iconv {
 	enum xenon_encoding from;
 	enum xenon_encoding to;
+	bool translit;
 };
 
 static const uint16_t cp1252_high[32] = {
@@ -89,9 +93,10 @@ iconv_t iconv_open(const char *tocode, const char *fromcode)
 
 	cd->from = encoding_from_name(fromcode);
 	cd->to = encoding_from_name(tocode);
+	cd->translit = strstr(tocode, "//TRANSLIT") != NULL ||
+		       strstr(tocode, "//translit") != NULL;
 
-	if (cd->from == ENC_UNKNOWN || cd->to == ENC_UNKNOWN ||
-	    cd->to != ENC_UTF8) {
+	if (cd->from == ENC_UNKNOWN || cd->to == ENC_UNKNOWN) {
 		free(cd);
 		errno = EINVAL;
 		return (iconv_t)-1;
@@ -115,12 +120,81 @@ static size_t put_utf8(uint32_t cp, char *out, size_t room)
 		out[1] = (char)(0x80 | (cp & 0x3f));
 		return 2;
 	}
-	if (room < 3)
+	if (cp < 0x10000) {
+		if (room < 3)
+			return 0;
+		out[0] = (char)(0xe0 | (cp >> 12));
+		out[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
+		out[2] = (char)(0x80 | (cp & 0x3f));
+		return 3;
+	}
+	if (room < 4)
 		return 0;
-	out[0] = (char)(0xe0 | (cp >> 12));
-	out[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
-	out[2] = (char)(0x80 | (cp & 0x3f));
-	return 3;
+	out[0] = (char)(0xf0 | (cp >> 18));
+	out[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
+	out[2] = (char)(0x80 | ((cp >> 6) & 0x3f));
+	out[3] = (char)(0x80 | (cp & 0x3f));
+	return 4;
+}
+
+/* One code point in the target encoding: the bytes written, 0 when out of
+ * room (E2BIG), or (size_t)-1 when the target can't hold it (EILSEQ). */
+static size_t put_char(const struct xenon_iconv *cd, uint32_t cp, char *out,
+		       size_t room)
+{
+	switch (cd->to) {
+	case ENC_UTF8:
+		return put_utf8(cp, out, room);
+	case ENC_UTF16LE:
+	case ENC_UTF16BE: {
+		uint16_t units[2];
+		size_t n = 1;
+		if (cp >= 0x10000) {
+			cp -= 0x10000;
+			units[0] = (uint16_t)(0xd800 | (cp >> 10));
+			units[1] = (uint16_t)(0xdc00 | (cp & 0x3ff));
+			n = 2;
+		} else {
+			units[0] = (uint16_t)cp;
+		}
+		if (room < n * 2)
+			return 0;
+		for (size_t i = 0; i < n; i++) {
+			if (cd->to == ENC_UTF16LE) {
+				out[i * 2] = (char)(units[i] & 0xff);
+				out[i * 2 + 1] = (char)(units[i] >> 8);
+			} else {
+				out[i * 2] = (char)(units[i] >> 8);
+				out[i * 2 + 1] = (char)(units[i] & 0xff);
+			}
+		}
+		return n * 2;
+	}
+	default: {
+		/* Single-byte targets. */
+		int byte = -1;
+		if (cp < 0x80)
+			byte = (int)cp;
+		else if (cd->to == ENC_LATIN1 && cp < 0x100)
+			byte = (int)cp;
+		else if (cd->to == ENC_CP1252) {
+			if (cp >= 0xa0 && cp < 0x100)
+				byte = (int)cp;
+			for (int i = 0; byte < 0 && i < 32; i++)
+				if (cp1252_high[i] == cp)
+					byte = 0x80 + i;
+		}
+		if (byte < 0) {
+			if (!cd->translit)
+				return (size_t)-1;
+			byte = '?';
+		}
+		if (room < 1)
+			return 0;
+		out[0] = (char)byte;
+		return 1;
+	}
+	}
 }
 
 size_t iconv(iconv_t cdp, char **inbuf, size_t *inbytesleft,
@@ -189,7 +263,11 @@ size_t iconv(iconv_t cdp, char **inbuf, size_t *inbytesleft,
 			step = 2;
 		}
 
-		produced = put_utf8(cp, out, outleft);
+		produced = put_char(cd, cp, out, outleft);
+		if (produced == (size_t)-1) {
+			errno = EILSEQ;
+			goto out;
+		}
 		if (produced == 0) {
 			errno = E2BIG;
 			goto out;

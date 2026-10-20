@@ -2,7 +2,8 @@
  * HTTP and HTTPS fetcher for the xenon (Xbox 360) frontend, on xsdk's
  * sockets and the mbedTLS port in third_party/mbedtls-xenon.
  *
- * One request at a time per fetch context: connect, GET, parse the status
+ * One request at a time per fetch context: connect, GET or POST (with the
+ * cookie jar's cookies, storing any Set-Cookie), parse the status
  * line and headers, then stream the body to the fetch core. Redirects go
  * back to llcache with FETCH_REDIRECT; chunked bodies are decoded. A
  * connection is kept alive for the next request to the same host, which
@@ -49,6 +50,7 @@
 
 #include "content/fetch.h"
 #include "content/fetchers.h"
+#include "content/urldb.h"
 
 #include "xenon/http.h"
 #include "xenon/time.h"
@@ -57,6 +59,9 @@
 #define HTTPS_PORT "443"
 #define HTTP_BUF_SIZE 4096
 #define HTTP_LINE_MAX 1024
+
+/* Larger stylesheets are not fetched (see fetch_http_transaction). */
+#define MAX_STYLESHEET_BYTES (512 * 1024)
 
 struct fetch_http_context {
 	struct fetch_http_context *r_next, *r_prev;
@@ -67,6 +72,13 @@ struct fetch_http_context {
 	bool only_2xx;
 	bool aborted;
 	bool locked;
+
+	/* A POST's body and its Content-Type; NULL for a GET. */
+	char *post_body;
+	size_t post_len;
+	char *post_type;
+	/* Extra request lines from the core, "Name: value" each. */
+	char **extra_headers;
 };
 
 static struct fetch_http_context *ring;
@@ -825,7 +837,8 @@ static bool http_parse_status(const char *line, int *code)
 	return *code >= 100 && *code < 600;
 }
 
-static bool http_read_headers(struct http_reader *r, struct http_response *resp)
+static bool http_read_headers(struct http_reader *r, struct http_response *resp,
+			      struct fetch *fetchh)
 {
 	char line[HTTP_LINE_MAX];
 	int first = 1;
@@ -869,6 +882,13 @@ static bool http_read_headers(struct http_reader *r, struct http_response *resp)
 			while (*value == ' ')
 				value++;
 			snprintf(resp->date, sizeof(resp->date), "%s", value);
+		} else if (strncasecmp(line, "Set-Cookie:", 11) == 0) {
+			/* The core's cookie jar parses and keeps it. */
+			const char *value = line + 11;
+			while (*value == ' ')
+				value++;
+			if (fetchh != NULL)
+				fetch_set_cookie(fetchh, value);
 		} else if (strncasecmp(line, "Connection:", 11) == 0) {
 			if (http_icontains(line + 11, "close"))
 				resp->close_after = true;
@@ -965,6 +985,183 @@ static char *http_build_target(const nsurl *url)
 	return path;
 }
 
+/* Appends printf-style text to a growing buffer; false when out of memory. */
+static bool buf_add(char **buf, size_t *len, size_t *cap, const char *fmt, ...)
+{
+	va_list ap;
+	int need;
+
+	va_start(ap, fmt);
+	need = vsnprintf(NULL, 0, fmt, ap);
+	va_end(ap);
+	if (need < 0)
+		return false;
+	if (*len + (size_t)need + 1 > *cap) {
+		size_t cap2 = (*cap + (size_t)need + 1) * 2;
+		char *grown = realloc(*buf, cap2);
+		if (grown == NULL)
+			return false;
+		*buf = grown;
+		*cap = cap2;
+	}
+	va_start(ap, fmt);
+	vsnprintf(*buf + *len, *cap - *len, fmt, ap);
+	va_end(ap);
+	*len += (size_t)need;
+	return true;
+}
+
+/* The request line, headers (with the jar's cookies for this URL) and,
+ * for a POST, the body. */
+static char *http_build_request(struct fetch_http_context *ctx, const char *host,
+				const char *target, size_t *out_len)
+{
+	char *buf = NULL;
+	size_t len = 0, cap = 0;
+	char *cookies = urldb_get_cookie(ctx->url, true);
+	bool ok;
+
+	ok = buf_add(&buf, &len, &cap,
+		     "%s %s HTTP/1.1\r\n"
+		     "Host: %s\r\n"
+		     "User-Agent: NetSurf/3.11 (Xenon)\r\n"
+		     "Accept: text/html,text/css,*/*;q=0.1\r\n"
+		     "Accept-Encoding: identity\r\n"
+		     "Connection: keep-alive\r\n",
+		     ctx->post_body != NULL ? "POST" : "GET", target, host);
+	if (ok && cookies != NULL && cookies[0] != '\0')
+		ok = buf_add(&buf, &len, &cap, "Cookie: %s\r\n", cookies);
+	for (size_t i = 0; ok && ctx->extra_headers != NULL &&
+			   ctx->extra_headers[i] != NULL; i++) {
+		/* Ours win over the core's for the fixed ones above. */
+		const char *h = ctx->extra_headers[i];
+		if (strncasecmp(h, "Accept-Encoding:", 16) == 0 ||
+		    strncasecmp(h, "Connection:", 11) == 0 ||
+		    strncasecmp(h, "Host:", 5) == 0)
+			continue;
+		ok = buf_add(&buf, &len, &cap, "%s\r\n", h);
+	}
+	if (ok && ctx->post_body != NULL)
+		ok = buf_add(&buf, &len, &cap,
+			     "Content-Type: %s\r\nContent-Length: %zu\r\n",
+			     ctx->post_type, ctx->post_len);
+	if (ok)
+		ok = buf_add(&buf, &len, &cap, "\r\n");
+	if (ok && ctx->post_body != NULL && ctx->post_len > 0) {
+		if (len + ctx->post_len + 1 > cap) {
+			char *grown = realloc(buf, len + ctx->post_len + 1);
+			ok = grown != NULL;
+			if (ok) {
+				buf = grown;
+				cap = len + ctx->post_len + 1;
+			}
+		}
+		if (ok) {
+			memcpy(buf + len, ctx->post_body, ctx->post_len);
+			len += ctx->post_len;
+		}
+	}
+	free(cookies);
+	if (!ok) {
+		free(buf);
+		return NULL;
+	}
+	*out_len = len;
+	return buf;
+}
+
+/* A multipart/form-data body. Files are sent by name only: the console
+ * has no file picker. */
+static bool http_build_multipart(struct fetch_http_context *ctx,
+				 const struct fetch_multipart_data *part)
+{
+	char boundary[48];
+	char *buf = NULL;
+	size_t len = 0, cap = 0;
+	bool ok = true;
+
+	snprintf(boundary, sizeof(boundary), "----NetSurf360%08x%08x",
+		 (unsigned)rand(), (unsigned)rand());
+	for (; ok && part != NULL; part = part->next) {
+		if (part->file)
+			ok = buf_add(&buf, &len, &cap,
+				     "--%s\r\nContent-Disposition: form-data; name=\"%s\"; "
+				     "filename=\"%s\"\r\nContent-Type: application/octet-stream"
+				     "\r\n\r\n\r\n", boundary, part->name,
+				     part->value != NULL ? part->value : "");
+		else
+			ok = buf_add(&buf, &len, &cap,
+				     "--%s\r\nContent-Disposition: form-data; name=\"%s\""
+				     "\r\n\r\n%s\r\n", boundary, part->name,
+				     part->value != NULL ? part->value : "");
+	}
+	if (ok)
+		ok = buf_add(&buf, &len, &cap, "--%s--\r\n", boundary);
+	if (ok) {
+		char type[96];
+		snprintf(type, sizeof(type), "multipart/form-data; boundary=%s", boundary);
+		ctx->post_type = strdup(type);
+		ok = ctx->post_type != NULL;
+	}
+	if (!ok) {
+		free(buf);
+		return false;
+	}
+	ctx->post_body = buf;
+	ctx->post_len = len;
+	return true;
+}
+
+/* Instagram's post and reel pages are built by scripts this browser can't
+ * run, but the embed page of the same post is plain HTML with the picture
+ * and the caption. Send post links there. */
+static bool instagram_redirect(struct fetch_http_context *ctx, lwc_string *host)
+{
+	const char *h = lwc_string_data(host);
+	lwc_string *path;
+	char code[64];
+	char kind[8];
+	char rest[16];
+	char target[160];
+	int n;
+	fetch_msg msg;
+
+	if (strcasecmp(h, "www.instagram.com") != 0 && strcasecmp(h, "instagram.com") != 0)
+		return false;
+	path = nsurl_get_component(ctx->url, NSURL_PATH);
+	if (path == NULL)
+		return false;
+	rest[0] = '\0';
+	n = sscanf(lwc_string_data(path), "/%7[a-z]/%63[A-Za-z0-9_-]/%15s", kind, code, rest);
+	lwc_string_unref(path);
+	if (n < 2 || (strcmp(kind, "p") != 0 && strcmp(kind, "reel") != 0))
+		return false;
+	/* The embed page itself is fine once it is the no-script variant;
+	 * the plain one only meta-refreshes there from a <noscript>. */
+	if (rest[0] != '\0') {
+		lwc_string *query;
+		bool noscript = false;
+
+		if (strncmp(rest, "embed", 5) != 0)
+			return false;
+		query = nsurl_get_component(ctx->url, NSURL_QUERY);
+		if (query != NULL) {
+			noscript = strstr(lwc_string_data(query), "_fb_noscript") != NULL;
+			lwc_string_unref(query);
+		}
+		if (noscript)
+			return false;
+	}
+
+	snprintf(target, sizeof(target),
+		 "https://www.instagram.com/p/%s/embed/captioned/?_fb_noscript=1", code);
+	fetch_set_http_code(ctx->fetchh, 302);
+	msg.type = FETCH_REDIRECT;
+	msg.data.redirect = target;
+	http_send(ctx, &msg);
+	return true;
+}
+
 static void fetch_http_transaction(struct fetch_http_context *ctx)
 {
 	struct http_reader reader;
@@ -976,11 +1173,15 @@ static void fetch_http_transaction(struct fetch_http_context *ctx)
 	const char *port_text = tls ? HTTPS_PORT : HTTP_PORT;
 	const char *why = "Cannot reach server";
 	char *target = NULL;
-	char request[2048];
+	char *request = NULL;
+	size_t request_len = 0;
 	bool ok = false;
 
 	host = nsurl_get_component(ctx->url, NSURL_HOST);
 	if (host == NULL)
+		goto out;
+
+	if (instagram_redirect(ctx, host))
 		goto out;
 
 	port = nsurl_get_component(ctx->url, NSURL_PORT);
@@ -991,15 +1192,8 @@ static void fetch_http_transaction(struct fetch_http_context *ctx)
 	if (target == NULL)
 		goto out;
 
-	if (snprintf(request, sizeof(request),
-		     "GET %s HTTP/1.1\r\n"
-		     "Host: %s\r\n"
-		     "User-Agent: NetSurf/3.11 (Xenon)\r\n"
-		     "Accept: text/html,text/css,*/*;q=0.1\r\n"
-		     "Accept-Encoding: identity\r\n"
-		     "Connection: keep-alive\r\n"
-		     "\r\n",
-		     target, lwc_string_data(host)) >= (int)sizeof(request))
+	request = http_build_request(ctx, lwc_string_data(host), target, &request_len);
+	if (request == NULL)
 		goto out;
 
 	{
@@ -1016,9 +1210,9 @@ static void fetch_http_transaction(struct fetch_http_context *ctx)
 				goto out;
 			}
 
-			if (http_conn_write(conn, request, strlen(request))) {
+			if (http_conn_write(conn, request, request_len)) {
 				reader_init(&reader, conn);
-				if (http_read_headers(&reader, &resp))
+				if (http_read_headers(&reader, &resp, ctx->fetchh))
 					break;
 			}
 
@@ -1039,7 +1233,26 @@ static void fetch_http_transaction(struct fetch_http_context *ctx)
 
 	xenon_time_note_http_date(resp.date);
 
+	/* What a form submission got back, never what it sent. */
+	if (ctx->post_body != NULL)
+		fprintf(stderr, "xenon: POST %s -> %d%s%s (%s)\n",
+			nsurl_access(ctx->url), resp.code,
+			resp.location[0] != '\0' ? " " : "", resp.location,
+			resp.content_type);
+
 	fetch_set_http_code(ctx->fetchh, resp.code);
+
+	/* A stylesheet this big (Instagram's is 1.1 MB) takes the console
+	 * minutes to match against a page; the page reads better unstyled
+	 * than not at all. */
+	if (resp.content_length > MAX_STYLESHEET_BYTES &&
+	    http_icontains(resp.content_type, "text/css")) {
+		NSLOG(netsurf, INFO, "http: skipping %lld-byte stylesheet %s",
+		      resp.content_length, nsurl_access(ctx->url));
+		pool_release();
+		http_send_error(ctx, "Stylesheet too large");
+		goto out;
+	}
 
 	/* A redirect goes back to the core, which joins relative targets. */
 	if ((resp.code == 301 || resp.code == 302 || resp.code == 303 ||
@@ -1103,6 +1316,7 @@ out:
 	if (port != NULL)
 		lwc_string_unref(port);
 	free(target);
+	free(request);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1144,17 +1358,35 @@ static void *fetch_http_setup(struct fetch *parent_fetch, nsurl *url,
 			      const char **headers)
 {
 	struct fetch_http_context *ctx;
-
-	/* POST and custom headers are not supported yet. */
-	if (post_urlenc != NULL || post_multipart != NULL)
-		return NULL;
+	size_t count = 0;
 
 	(void)downgrade_tls;
-	(void)headers;
 
 	ctx = calloc(1, sizeof(*ctx));
 	if (ctx == NULL)
 		return NULL;
+
+	if (post_urlenc != NULL) {
+		ctx->post_body = strdup(post_urlenc);
+		ctx->post_len = strlen(post_urlenc);
+		ctx->post_type = strdup("application/x-www-form-urlencoded");
+		if (ctx->post_body == NULL || ctx->post_type == NULL)
+			goto fail;
+	} else if (post_multipart != NULL) {
+		if (!http_build_multipart(ctx, post_multipart))
+			goto fail;
+	}
+
+	while (headers != NULL && headers[count] != NULL)
+		count++;
+	if (count > 0) {
+		ctx->extra_headers = calloc(count + 1, sizeof(char *));
+		if (ctx->extra_headers == NULL)
+			goto fail;
+		for (size_t i = 0; i < count; i++)
+			if ((ctx->extra_headers[i] = strdup(headers[i])) == NULL)
+				goto fail;
+	}
 
 	ctx->fetchh = parent_fetch;
 	ctx->url = nsurl_ref(url);
@@ -1163,6 +1395,16 @@ static void *fetch_http_setup(struct fetch *parent_fetch, nsurl *url,
 	RING_INSERT(ring, ctx);
 
 	return ctx;
+
+fail:
+	free(ctx->post_body);
+	free(ctx->post_type);
+	if (ctx->extra_headers != NULL)
+		for (size_t i = 0; ctx->extra_headers[i] != NULL; i++)
+			free(ctx->extra_headers[i]);
+	free(ctx->extra_headers);
+	free(ctx);
+	return NULL;
 }
 
 static bool fetch_http_start(void *ctx)
@@ -1185,6 +1427,12 @@ static void fetch_http_free(void *ctx)
 	struct fetch_http_context *c = ctx;
 
 	nsurl_unref(c->url);
+	free(c->post_body);
+	free(c->post_type);
+	if (c->extra_headers != NULL)
+		for (size_t i = 0; c->extra_headers[i] != NULL; i++)
+			free(c->extra_headers[i]);
+	free(c->extra_headers);
 	free(c);
 }
 

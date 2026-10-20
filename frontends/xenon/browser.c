@@ -115,7 +115,7 @@ void xenon_tab_activate(int index)
 	if (g == NULL || g->bw == xenon_bw)
 		return;
 	xenon_bw = g->bw;
-	xenon_needs_redraw = true;
+	xenon_damage_all();
 	xenon_ui_chrome_changed();
 }
 
@@ -230,7 +230,7 @@ gui_window_destroy(struct gui_window *g)
 
 	if (was_active) {
 		xenon_bw = tab_count > 0 ? tabs[tab_count - 1]->bw : NULL;
-		xenon_needs_redraw = true;
+		xenon_damage_all();
 	}
 	xenon_ui_chrome_changed();
 	free(g);
@@ -309,6 +309,8 @@ gui_window_set_scroll(struct gui_window *gw, const struct rect *rect)
 {
 	gw->scrollx = rect->x0;
 	gw->scrolly = rect->y0;
+	if (gw->bw == xenon_bw)
+		xenon_needs_redraw = true;
 
 	moutf(MOUT_WINDOW, "SET_SCROLL WIN %u X %d Y %d",
 		gw->win_num, rect->x0, rect->y0);
@@ -336,7 +338,12 @@ xenon_window_invalidate_area(struct gui_window *gw, const struct rect *rect)
 		moutf(MOUT_WINDOW, "INVALIDATE_AREA WIN %u ALL", gw->win_num);
 	}
 
-	xenon_needs_redraw = true;
+	if (gw->bw == xenon_bw) {
+		if (rect != NULL)
+			xenon_damage_rect(rect);
+		else
+			xenon_damage_all();
+	}
 
 	return NSERROR_OK;
 }
@@ -356,8 +363,8 @@ gui_window_update_extent(struct gui_window *g)
 static void
 gui_window_set_status(struct gui_window *g, const char *text)
 {
-	moutf(MOUT_WINDOW, "SET_STATUS WIN %u STR %s", g->win_num, text);
-	xenon_ui_toast(text);
+	if (g != NULL && g->bw == xenon_bw)
+		xenon_ui_status(text);
 }
 
 static void
@@ -466,12 +473,16 @@ gui_window_place_caret(struct gui_window *g, int x, int y, int height,
 {
 	moutf(MOUT_WINDOW, "PLACE_CARET WIN %u X %d Y %d HEIGHT %d",
 	      g->win_num, x, y, height);
+	if (g->bw == xenon_bw)
+		xenon_ui_caret(true);
 }
 
 static void
 gui_window_remove_caret(struct gui_window *g)
 {
 	moutf(MOUT_WINDOW, "REMOVE_CARET WIN %u", g->win_num);
+	if (g->bw == xenon_bw)
+		xenon_ui_caret(false);
 }
 
 static bool
@@ -940,3 +951,59 @@ static struct gui_window_table window_table = {
 };
 
 struct gui_window_table *xenon_window_table = &window_table;
+
+/* The page's scroll range: how far it can scroll down and right. */
+static void scroll_limits(struct gui_window *g, int *max_x, int *max_y)
+{
+	int width = 0;
+	int height = 0;
+
+	if (browser_window_get_extents(g->bw, true, &width, &height) != NSERROR_OK) {
+		width = 0;
+		height = 0;
+	}
+	*max_x = width > XENON_WIDTH ? width - XENON_WIDTH : 0;
+	*max_y = height > XENON_PAGE_HEIGHT ? height - XENON_PAGE_HEIGHT : 0;
+}
+
+bool xenon_scroll_by(int dx, int dy)
+{
+	struct gui_window *g = xenon_tab_active();
+	int max_x, max_y, x, y;
+
+	if (g == NULL || g->bw == NULL)
+		return false;
+	scroll_limits(g, &max_x, &max_y);
+	x = g->scrollx + dx;
+	y = g->scrolly + dy;
+	if (x > max_x)
+		x = max_x;
+	if (y > max_y)
+		y = max_y;
+	if (x < 0)
+		x = 0;
+	if (y < 0)
+		y = 0;
+	if (x == g->scrollx && y == g->scrolly)
+		return false;
+	g->scrollx = x;
+	g->scrolly = y;
+	xenon_needs_redraw = true;
+	return true;
+}
+
+bool xenon_scroll_info(int *y, int *view, int *total)
+{
+	struct gui_window *g = xenon_tab_active();
+	int max_x, max_y;
+
+	if (g == NULL || g->bw == NULL)
+		return false;
+	scroll_limits(g, &max_x, &max_y);
+	if (max_y <= 0)
+		return false;
+	*y = g->scrolly;
+	*view = XENON_PAGE_HEIGHT;
+	*total = max_y + XENON_PAGE_HEIGHT;
+	return true;
+}

@@ -15,5 +15,6 @@ utf8proc https://github.com/JuliaStrings/utf8proc.git f72a4023617e2d879f2ca93086
 zlib https://github.com/madler/zlib.git 51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf
 jpeg https://www.ijg.org/files/jpegsrc.v9e.tar.gz 9e
 mbedtls-xenon https://github.com/xenosworks/mbedtls-xenon.git 1500b8ac2ab62f3ce6c6bebafac777e55dbee93b
+nsgenbind https://github.com/netsurf-browser/nsgenbind.git 44c6736937ae17d4065d02959b82813b8f06a51e
 netsurf https://github.com/netsurf-browser/netsurf.git 39da3c3a40af4566d86500ff3052dfdc7f9a0378
 xsdk https://github.com/xenosworks/xsdk.git (build libxsdk.a from the tested tree)

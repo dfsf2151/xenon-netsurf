@@ -27,6 +27,8 @@ enum {
 	/* Cursor pixels per frame at full deflection. */
 	STICK_SPEED = 14,
 	DPAD_SPEED = 10,
+	/* Page pixels per frame at full right-stick deflection. */
+	SCROLL_SPEED = 48,
 	/* How long a scripted "tap" holds its button down. */
 	TAP_MS = 90,
 	/* Scripted button holds in flight at once. */
@@ -52,6 +54,8 @@ static uint16_t pad_buttons;
 static uint16_t pad_previous;
 static int pad_dx;
 static int pad_dy;
+static int pad_scroll_x;
+static int pad_scroll_y;
 
 static FILE *script;
 static uint64_t script_start;
@@ -205,6 +209,8 @@ void xenon_input_poll(void)
 	pad_buttons = 0;
 	pad_dx = 0;
 	pad_dy = 0;
+	pad_scroll_x = 0;
+	pad_scroll_y = 0;
 
 	if (XamInputGetState(0, 0, &state) == ERROR_SUCCESS) {
 		const INPUT_GAMEPAD *pad = &state.gamepad;
@@ -221,8 +227,22 @@ void xenon_input_poll(void)
 
 		if (pad->thumb_lx < -DEAD_ZONE || pad->thumb_lx > DEAD_ZONE)
 			pad_dx += (int32_t)pad->thumb_lx * STICK_SPEED / 32768;
+		/* The stick's Y is positive upwards; the screen's grows down. */
 		if (pad->thumb_ly < -DEAD_ZONE || pad->thumb_ly > DEAD_ZONE)
-			pad_dy += (int32_t)pad->thumb_ly * STICK_SPEED / 32768;
+			pad_dy -= (int32_t)pad->thumb_ly * STICK_SPEED / 32768;
+
+		/* The right stick scrolls: slow near the centre, fast at
+		 * the edge. Up on the stick scrolls the page up. */
+		if (pad->thumb_ry < -DEAD_ZONE || pad->thumb_ry > DEAD_ZONE) {
+			int32_t v = pad->thumb_ry;
+			pad_scroll_y = -(int)((int64_t)v * (v < 0 ? -v : v) *
+					      SCROLL_SPEED / (32768LL * 32768LL));
+		}
+		if (pad->thumb_rx < -DEAD_ZONE || pad->thumb_rx > DEAD_ZONE) {
+			int32_t v = pad->thumb_rx;
+			pad_scroll_x = (int)((int64_t)v * (v < 0 ? -v : v) *
+					     SCROLL_SPEED / (32768LL * 32768LL));
+		}
 	}
 
 	script_previous = script_buttons;
@@ -253,4 +273,10 @@ void xenon_input_delta(int *dx, int *dy)
 {
 	*dx = pad_dx;
 	*dy = pad_dy;
+}
+
+void xenon_input_scroll(int *dx, int *dy)
+{
+	*dx = pad_scroll_x;
+	*dy = pad_scroll_y;
 }

@@ -36,5 +36,7 @@ bool xenon_input_released(enum xenon_button button);
 
 /* Cursor movement for this frame, in pixels. */
 void xenon_input_delta(int *dx, int *dy);
+/* Page scroll asked for by the right stick this frame, in pixels. */
+void xenon_input_scroll(int *dx, int *dy);
 
 #endif
